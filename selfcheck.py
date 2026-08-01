@@ -148,7 +148,7 @@ class Verdict:
     @property
     def hint(self) -> str:
         parts = [HINTS[p] for p in self.problems if p in HINTS]
-        if self.note:
+        if self.note and self.note not in {"reviewed", "rules-only", "math-verified", "review-error"}:
             parts.append(self.note)
         return " ".join(parts) or HINTS["error"]
 
@@ -157,6 +157,15 @@ class Verdict:
 
     def severity(self) -> int:
         return sum(SEVERITY.get(p, 2) for p in self.problems)
+
+    @property
+    def checked(self) -> bool:
+        """Ответ реально проверен (правила/математика/LLM), а не «ок по умолчанию»."""
+        if not self.ok:
+            return False
+        if self.note == "review-error":
+            return False
+        return True
 
 
 def _eval_node(node: ast.AST) -> float:
@@ -193,11 +202,21 @@ def _fmt_number(value: float) -> str:
 
 
 def _mentions_number(answer: str, value: float) -> bool:
-    norm = re.sub(r"[\s\u00a0,'’]", "", answer).replace("\u2212", "-")
+    """Ищем число как отдельный токен, а не подстроку (`2` ≠ `20` / `12`)."""
+    text = (answer or "").replace("\u2212", "-").replace("\u00a0", " ")
+    # Убираем только разделители тысяч внутри чисел, пробелы оставляем как границы
+    text = re.sub(r"(?<=\d)[,'’](?=\d)", "", text)
     variants = {_fmt_number(value)}
     if abs(value - round(value)) >= 1e-9:
         variants.add(f"{value:.2f}".rstrip("0").rstrip("."))
-    return any(v in norm for v in variants)
+        variants.add(f"{value:.4f}".rstrip("0").rstrip("."))
+    for v in variants:
+        if re.search(
+            rf"(?<![A-Za-zА-Яа-яЁё0-9.]){re.escape(v)}(?![A-Za-zА-Яа-яЁё0-9.])",
+            text,
+        ):
+            return True
+    return False
 
 
 def arithmetic_problems(user_text: str, answer: str) -> tuple[list[str], str, bool]:
@@ -240,8 +259,22 @@ def _ratio(pattern: re.Pattern[str], text: str) -> float:
     return len(pattern.findall(text)) / len(letters)
 
 
+_TRANSLATE_RE = re.compile(
+    r"перевед|translate|на\s+английск|in\s+english|на\s+русск|in\s+russian|"
+    r"на\s+немецк|на\s+француз|на\s+испан",
+    re.IGNORECASE,
+)
+
+
 def language_problems(user_text: str, answer: str) -> list[str]:
     """Ответ должен быть на языке вопроса; иероглифы без запроса — срыв."""
+    # Явная просьба сменить язык — не штрафуем за латиницу/другой язык
+    if _TRANSLATE_RE.search(user_text or ""):
+        user_cjk = bool(_CJK_RE.search(user_text))
+        if not user_cjk and _ratio(_CJK_RE, answer) > 0.02:
+            return ["cjk"]
+        return []
+
     problems: list[str] = []
     user_cjk = bool(_CJK_RE.search(user_text))
     answer_cjk = _ratio(_CJK_RE, answer)
@@ -294,6 +327,8 @@ def llm_review(
     timeout: int = 180,
 ) -> Verdict:
     """Ревью ответа отдельной моделью: ловит ошибки и уход от вопроса."""
+    # Промпт ≤ ~3k токенов оценки — 4096 с запасом, без удержания полного 8k
+    review_ctx = 4096
     messages = [
         {"role": "system", "content": REVIEW_SYSTEM},
         {
@@ -307,24 +342,25 @@ def llm_review(
             messages,
             fmt=REVIEW_SCHEMA,
             temperature=0.0,
-            num_ctx=8192,
-            keep_alive="10m",
+            num_ctx=review_ctx,
+            keep_alive="5m",
             timeout=timeout,
         )
         data = json.loads((msg.get("content") or "").strip())
     except Exception:  # noqa: BLE001 — ревью не должно ломать основной ответ
-        return Verdict(True)
+        # Не помечаем как проверенный: ok=True без reviewed → checked=False снаружи
+        return Verdict(True, note="review-error")
 
     if not isinstance(data, dict) or data.get("ok", True):
-        return Verdict(True)
+        return Verdict(True, note="reviewed")
 
     problem = str(data.get("problem") or "error").strip()
     if problem in {"none", ""}:
-        return Verdict(True)
+        return Verdict(True, note="reviewed")
     if problem not in HINTS:
         problem = "error"
     note = str(data.get("hint") or "").strip()[:200]
-    return Verdict(False, [problem], note)
+    return Verdict(False, [problem], note or "reviewed")
 
 
 def check(
@@ -345,9 +381,10 @@ def check(
     if math_problems:
         return Verdict(False, math_problems, math_note)
     if math_verified:
-        return Verdict(True)
+        return Verdict(True, note="math-verified")
 
     if use_llm and model and len(answer.strip()) >= 40:
         return llm_review(user_text, answer, model=model)
 
-    return Verdict(True)
+    # Правила прошли, LLM не вызывали — для коротких ответов этого достаточно
+    return Verdict(True, note="rules-only")

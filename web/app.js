@@ -19,6 +19,7 @@
     chats: [],
     activeId: null,
     busy: false,
+    selectGen: 0,
   };
 
   function forceTier() {
@@ -84,6 +85,11 @@
         els.health.textContent = "Нет моделей: " + h.missing.join(", ");
         return;
       }
+      if (h.missing_optional && h.missing_optional.length) {
+        els.health.className = "health warn";
+        els.health.textContent = "Опционально: " + h.missing_optional.join(", ");
+        return;
+      }
       els.health.className = "health ok";
       els.health.textContent = "Ollama · модели на месте";
     } catch (e) {
@@ -110,6 +116,9 @@
     if (meta.tier) chips.push(`<span class="chip accent">${escapeHtml(meta.tier)}</span>`);
     if (meta.model) chips.push(`<span class="chip">${escapeHtml(meta.model)}</span>`);
     if (meta.need_web) chips.push(`<span class="chip">web</span>`);
+    if (meta.num_ctx) chips.push(`<span class="chip">ctx ${escapeHtml(meta.num_ctx)}</span>`);
+    if (meta.used_history === false) chips.push(`<span class="chip">без истории</span>`);
+    else if (meta.used_history === true) chips.push(`<span class="chip">история</span>`);
     if (meta.escalated) chips.push(`<span class="chip warn">escalated</span>`);
     if (meta.attempts > 1)
       chips.push(`<span class="chip warn">попыток: ${escapeHtml(meta.attempts)}</span>`);
@@ -151,8 +160,10 @@
 
   async function selectChat(id) {
     if (state.busy) return;
+    const gen = ++state.selectGen;
     state.activeId = id;
     const data = await api(`/api/chats/${id}`);
+    if (gen !== state.selectGen || state.activeId !== id) return;
     els.chatTitle.textContent = data.title || "New Chat";
     renderMessages(data.messages);
     renderChatList();
@@ -171,13 +182,18 @@
 
   async function newChat() {
     if (state.busy) return;
-    const chat = await api("/api/chats", { method: "POST", body: "{}" });
-    state.chats.unshift(chat);
-    state.activeId = chat.id;
-    els.chatTitle.textContent = chat.title;
-    els.messages.innerHTML = "";
-    renderChatList();
-    els.input.focus();
+    setBusy(true);
+    try {
+      const chat = await api("/api/chats", { method: "POST", body: "{}" });
+      state.chats.unshift(chat);
+      state.activeId = chat.id;
+      els.chatTitle.textContent = chat.title;
+      els.messages.innerHTML = "";
+      renderChatList();
+    } finally {
+      setBusy(false);
+      els.input.focus();
+    }
   }
 
   async function clearChat() {
@@ -186,7 +202,6 @@
     els.messages.innerHTML = "";
     els.chatTitle.textContent = "New Chat";
     await loadChats();
-    renderChatList();
   }
 
   async function deleteChat() {
@@ -206,13 +221,13 @@
 
   function parseSseChunk(buffer) {
     const events = [];
-    const parts = buffer.split("\n\n");
+    const parts = buffer.split(/\r?\n\r?\n/);
     const rest = parts.pop() || "";
     for (const block of parts) {
       if (!block.trim()) continue;
       let event = "message";
       const dataLines = [];
-      for (const line of block.split("\n")) {
+      for (const line of block.split(/\r?\n/)) {
         if (line.startsWith("event:")) event = line.slice(6).trim();
         else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
       }
@@ -228,23 +243,127 @@
     return { events, rest };
   }
 
+  function applySseEvent(event, data, ctx) {
+    const { bodyEl, toolsEl, metaSlot } = ctx;
+    if (event === "meta") {
+      if (data.phase === "retry" || data.phase === "restore") {
+        ctx.full = "";
+        bodyEl.textContent = "";
+      }
+      if (data.phase === "retry" && data.problems && data.problems.length) {
+        const line = document.createElement("div");
+        line.className = "tool-line";
+        line.textContent = `повтор (${data.problems.join(", ")}) → ${data.model || ""}`;
+        toolsEl.appendChild(line);
+      }
+      if (data.phase === "restore") {
+        ctx.liveMeta = { ...ctx.liveMeta, ...data, problems: [] };
+        const line = document.createElement("div");
+        line.className = "tool-line";
+        line.textContent = `восстановлен лучший ответ (${data.model || ""})`;
+        toolsEl.appendChild(line);
+      } else {
+        ctx.liveMeta = { ...ctx.liveMeta, ...data };
+      }
+      metaSlot.innerHTML = metaChips(ctx.liveMeta);
+      const bits = [];
+      if (ctx.liveMeta.tier) bits.push(ctx.liveMeta.tier);
+      if (ctx.liveMeta.model) bits.push(ctx.liveMeta.model);
+      if (ctx.liveMeta.need_web) bits.push("web");
+      if (ctx.liveMeta.num_ctx) bits.push("ctx " + ctx.liveMeta.num_ctx);
+      if (ctx.liveMeta.used_history === false) bits.push("без истории");
+      if (data.phase === "retry") bits.push("повтор");
+      else if (data.phase === "restore") bits.push("restore");
+      else if (ctx.liveMeta.escalated) bits.push("escalate");
+      els.statusLine.textContent = bits.join(" · ") || "Генерация…";
+    } else if (event === "check") {
+      ctx.liveMeta = {
+        ...ctx.liveMeta,
+        checked: data.checked != null ? !!data.checked : !!data.ok,
+        problems: data.ok ? [] : data.problems || [],
+      };
+      metaSlot.innerHTML = metaChips(ctx.liveMeta);
+      if (!data.ok) {
+        const line = document.createElement("div");
+        line.className = "tool-line";
+        const note = data.note ? ` — ${data.note}` : "";
+        line.textContent = `self-check: ${(data.problems || []).join(", ")}${note}`;
+        toolsEl.appendChild(line);
+      }
+    } else if (event === "token") {
+      ctx.full += data.text || "";
+      bodyEl.textContent = ctx.full;
+      els.messages.scrollTop = els.messages.scrollHeight;
+    } else if (event === "tool") {
+      const line = document.createElement("div");
+      line.className = "tool-line";
+      const args =
+        typeof data.arguments === "string"
+          ? data.arguments
+          : JSON.stringify(data.arguments || {});
+      line.textContent = `tool ${data.name}(${args})`;
+      toolsEl.appendChild(line);
+    } else if (event === "done") {
+      ctx.liveMeta = {
+        tier: data.tier,
+        model: data.model,
+        need_web: data.need_web,
+        route_reason: data.route_reason,
+        escalated: data.escalated,
+        attempts: data.attempts,
+        checked: data.checked,
+        problems: data.problems || [],
+        num_ctx: data.num_ctx,
+        used_history: data.used_history,
+        context_reason: data.context_reason,
+      };
+      if (data.text) {
+        ctx.full = data.text;
+        bodyEl.textContent = ctx.full;
+      }
+      metaSlot.innerHTML = metaChips(ctx.liveMeta);
+      els.statusLine.textContent = [
+        data.tier,
+        data.model,
+        data.need_web ? "web" : null,
+        data.num_ctx ? `ctx ${data.num_ctx}` : null,
+        data.used_history === false ? "без истории" : null,
+        data.escalated ? "escalated" : null,
+        data.attempts > 1 ? `попыток: ${data.attempts}` : null,
+        data.checked ? "проверено" : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    } else if (event === "error") {
+      throw new Error(data.message || "Ошибка оркестра");
+    }
+  }
+
   async function send() {
     const text = els.input.value.trim();
     if (!text || state.busy) return;
 
-    const chatId = await ensureChat();
+    setBusy(true);
+    els.statusLine.textContent = "Роутинг…";
+
+    let chatId;
+    try {
+      chatId = await ensureChat();
+    } catch (e) {
+      setBusy(false);
+      els.statusLine.textContent = "Ошибка";
+      return;
+    }
+
     els.input.value = "";
     autosize();
     appendMessage("user", text);
-    setBusy(true);
-    els.statusLine.textContent = "Роутинг…";
 
     const asst = appendMessage("assistant", "", null, { streaming: true });
     const bodyEl = asst.querySelector(".msg-body");
     const toolsEl = asst.querySelector(".msg-tools");
     const metaSlot = asst.querySelector(".msg-meta-slot");
-    let liveMeta = {};
-    let full = "";
+    const ctx = { liveMeta: {}, full: "", bodyEl, toolsEl, metaSlot };
 
     try {
       const res = await fetch(`/api/chats/${chatId}/messages`, {
@@ -269,88 +388,18 @@
         buf = rest;
 
         for (const { event, data } of events) {
-          if (event === "meta") {
-            if (data.phase === "escalate" || data.phase === "retry") {
-              full = "";
-              bodyEl.textContent = "";
-            }
-            if (data.phase === "retry" && data.problems && data.problems.length) {
-              const line = document.createElement("div");
-              line.className = "tool-line";
-              line.textContent = `повтор (${data.problems.join(", ")}) → ${data.model || ""}`;
-              toolsEl.appendChild(line);
-            }
-            liveMeta = { ...liveMeta, ...data };
-            metaSlot.innerHTML = metaChips(liveMeta);
-            const bits = [];
-            if (liveMeta.tier) bits.push(liveMeta.tier);
-            if (liveMeta.model) bits.push(liveMeta.model);
-            if (liveMeta.need_web) bits.push("web");
-            if (data.phase === "retry") bits.push("повтор");
-            else if (liveMeta.escalated || data.phase === "escalate") bits.push("escalate");
-            els.statusLine.textContent = bits.join(" · ") || "Генерация…";
-          } else if (event === "check") {
-            liveMeta = {
-              ...liveMeta,
-              checked: !!data.ok,
-              problems: data.ok ? [] : data.problems || [],
-            };
-            metaSlot.innerHTML = metaChips(liveMeta);
-            if (!data.ok) {
-              const line = document.createElement("div");
-              line.className = "tool-line";
-              const note = data.note ? ` — ${data.note}` : "";
-              line.textContent = `self-check: ${(data.problems || []).join(", ")}${note}`;
-              toolsEl.appendChild(line);
-            }
-          } else if (event === "token") {
-            full += data.text || "";
-            bodyEl.textContent = full;
-            els.messages.scrollTop = els.messages.scrollHeight;
-          } else if (event === "tool") {
-            const line = document.createElement("div");
-            line.className = "tool-line";
-            const args =
-              typeof data.arguments === "string"
-                ? data.arguments
-                : JSON.stringify(data.arguments || {});
-            line.textContent = `tool ${data.name}(${args})`;
-            toolsEl.appendChild(line);
-          } else if (event === "done") {
-            liveMeta = {
-              tier: data.tier,
-              model: data.model,
-              need_web: data.need_web,
-              route_reason: data.route_reason,
-              escalated: data.escalated,
-              attempts: data.attempts,
-              checked: data.checked,
-              problems: data.problems || [],
-            };
-            if (data.text) {
-              full = data.text;
-              bodyEl.textContent = full;
-            }
-            metaSlot.innerHTML = metaChips(liveMeta);
-            els.statusLine.textContent = [
-              data.tier,
-              data.model,
-              data.need_web ? "web" : null,
-              data.escalated ? "escalated" : null,
-              data.attempts > 1 ? `попыток: ${data.attempts}` : null,
-              data.checked ? "проверено" : null,
-            ]
-              .filter(Boolean)
-              .join(" · ");
-          } else if (event === "error") {
-            throw new Error(data.message || "Ошибка оркестра");
-          }
+          applySseEvent(event, data, ctx);
+        }
+      }
+      if (buf.trim()) {
+        const { events } = parseSseChunk(buf + "\n\n");
+        for (const { event, data } of events) {
+          applySseEvent(event, data, ctx);
         }
       }
 
       asst.classList.remove("streaming");
       await loadChats();
-      renderChatList();
       const active = state.chats.find((c) => c.id === chatId);
       if (active) els.chatTitle.textContent = active.title;
     } catch (e) {

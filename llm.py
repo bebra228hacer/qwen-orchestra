@@ -1,4 +1,8 @@
-"""Низкоуровневый клиент Ollama, общий для всех моделей оркестра."""
+"""Низкоуровневый клиент Ollama, общий для всех моделей оркестра.
+
+`num_ctx` передаётся в `options` каждого chat/chat_stream; размер окна
+подбирает оркестр (`plan_worker_context`), не этот модуль.
+"""
 
 from __future__ import annotations
 
@@ -70,6 +74,8 @@ def chat(
     )
     with _request(payload, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
+    if err := data.get("error"):
+        raise RuntimeError(f"Ollama ({model}): {err}")
     return data.get("message") or {}
 
 
@@ -101,6 +107,8 @@ def chat_stream(
             if not line:
                 continue
             chunk = json.loads(line)
+            if err := chunk.get("error"):
+                raise RuntimeError(f"Ollama ({model}): {err}")
             piece = (chunk.get("message") or {}).get("content", "")
             if piece:
                 parts.append(piece)

@@ -1,4 +1,4 @@
-"""Роутер: валидация запроса + выбор tier (tiny / mid / heavy).
+"""Роутер: валидация запроса + выбор tier (tiny / mid / heavy / xlarge / coder).
 
 Решение принимает 0.5b, но её выбор ограничен снизу детерминированными
 правилами (`tier_floor`) — модель может поднять тир, но не опустить ниже
@@ -17,9 +17,12 @@
 | длина > 400 символов | heavy |
 | архитектура, рефакторинг, оптимизация, сравнение, доказательство | heavy |
 | тесты, обработка ошибок, план внедрения, миграция | heavy |
-| запрос на код + длинное описание (> 90) или 3+ требований | heavy |
+| запрос на код + длинное описание (> 90) или 3+ требований | coder |
 | 3+ вопроса в одном сообщении | heavy |
-| traceback / стектрейс / отладка ошибки | heavy |
+| traceback / стектрейс / отладка ошибки | coder |
+
+Эскалация после самопроверки: tiny → mid → heavy → xlarge.
+Тяжёлый код стартует на `coder` (qwen2.5-coder:14b); при провале → xlarge.
 
 Модель может поднять тир выше floor, но не опустить ниже.
 """
@@ -33,8 +36,17 @@ from typing import Literal
 
 from llm import chat
 
-Tier = Literal["tiny", "mid", "heavy"]
-TIER_ORDER: list[Tier] = ["tiny", "mid", "heavy"]
+Tier = Literal["tiny", "mid", "heavy", "xlarge", "coder"]
+# Лестница эскалации по размеру (coder — боковая ветка для кода)
+TIER_ORDER: list[Tier] = ["tiny", "mid", "heavy", "xlarge"]
+TIER_RANK: dict[Tier, int] = {
+    "tiny": 0,
+    "mid": 1,
+    "heavy": 2,
+    "xlarge": 3,
+    "coder": 3,
+}
+ALL_TIERS: frozenset[str] = frozenset(TIER_RANK)
 
 ROUTE_MODEL = "qwen2.5:0.5b"
 REVALIDATE_MODEL = "qwen2.5:3b"
@@ -93,6 +105,15 @@ _WEB_KEYS = (
     "https://",
     "что происходит",
     "свеж",
+    "поищи",
+    "погугли",
+    "найди в интернет",
+    "найди в сети",
+    "гугл",
+    "google",
+    "look up",
+    "search the web",
+    "search online",
 )
 
 _TINY_KEYS = (
@@ -111,6 +132,12 @@ _TINY_KEYS = (
     "hey",
     "thanks",
     "bye",
+)
+
+# Короткие EN-приветствия только как целые слова (иначе hi ⊂ this/history)
+_TINY_WORD_RE = re.compile(
+    r"(?:^|[^\w])(?:hi|hey|hello|bye|thanks|привет|пока)(?:[^\w]|$)",
+    re.IGNORECASE,
 )
 
 _HEAVY_KEYS = (
@@ -150,7 +177,8 @@ _CODE_RE = re.compile(
     re.IGNORECASE,
 )
 _MID_RE = re.compile(
-    r"объясн|напиш|переведи|сделай|подскаж|как\s|почему|что такое|скрипт|функци|код\b|список|инструкц",
+    r"объясн|напиш|переведи|сделай|подскаж|как\s|почему|что такое|скрипт|функци|код\b|список|инструкц|"
+    r"\bexplain\b|\bwrite\b|\btranslate\b|\bhow\s+to\b|\bwhat\s+is\b|\bcode\b",
     re.IGNORECASE,
 )
 _MATH_RE = re.compile(r"\d{2,}\s*[\+\-\*/^]\s*\d|процент|интеграл|производн|уравнени")
@@ -160,8 +188,13 @@ _ALNUM_RE = re.compile(r"[A-Za-zА-Яа-яЁё\d]")
 _BRIEF_RE = re.compile(r"кратко|коротко|в двух словах|одним словом|briefly|in short", re.IGNORECASE)
 # 0.5b любит ставить need_web без причины; её «да» принимаем только при этих признаках
 _SOFT_WEB_RE = re.compile(
-    r"последн|нов(ый|ая|ости)|верси|релиз|цена|стоимост|курс|когда\s|дата|кто такой|"
-    r"рейтинг|статистик|прогноз|расписани|сколько сейчас",
+    r"(?:"
+    r"последн|нов(?:ый|ая|ое|ые|ости)|верси(?:я|и|ю)|релиз|стоимост|"
+    r"\bкурс\b|когда\s|дата\b|кто такой|"
+    r"рейтинг|статистик|прогноз|расписани|сколько сейчас|"
+    r"поищи|погугли|найди\s+в\s+(?:интернет|сети)|look\s+up|search\s+(?:the\s+)?(?:web|online)|"
+    r"цена\b"
+    r")",
     re.IGNORECASE,
 )
 _CODE_REQUEST_RE = re.compile(
@@ -174,7 +207,7 @@ _REQUIREMENT_RE = re.compile(r"[,;]|\bи\b|\bтакже\b|\bплюс\b", re.IGNO
 
 
 def _tier_max(a: Tier, b: Tier) -> Tier:
-    return TIER_ORDER[max(TIER_ORDER.index(a), TIER_ORDER.index(b))]
+    return a if TIER_RANK[a] >= TIER_RANK[b] else b
 
 
 def _extract_json(text: str) -> dict | None:
@@ -196,14 +229,39 @@ def _extract_json(text: str) -> dict | None:
 
 def _looks_web(user_text: str) -> bool:
     t = user_text.strip().lower()
-    return any(k in t for k in _WEB_KEYS)
+    return any(k in t for k in _WEB_KEYS) or bool(_SOFT_WEB_RE.search(t))
+
+
+def need_web(user_text: str) -> bool:
+    """Нужен ли интернет — детерминированно (для force_tier и shortcuts)."""
+    return _looks_web(user_text)
 
 
 def _looks_tiny(user_text: str) -> bool:
     t = user_text.strip().lower()
     if _looks_web(user_text):
         return False
-    if len(t) <= 24 and any(k in t for k in _TINY_KEYS):
+    if len(t) > 24:
+        return False
+    # Многословные ключи — подстрокой; короткие EN — только целиком
+    phrase_keys = (
+        "привет",
+        "здравствуй",
+        "здравствуйте",
+        "как дела",
+        "спасибо",
+        "благодар",
+        "пока",
+        "доброе утро",
+        "добрый день",
+        "добрый вечер",
+        "hello",
+        "thanks",
+        "bye",
+    )
+    if any(k in t for k in phrase_keys):
+        return True
+    if _TINY_WORD_RE.search(t):
         return True
     if re.fullmatch(r"\d+\s*[\+\-\*/]\s*\d+\s*=?\s*", t):
         return True
@@ -225,7 +283,12 @@ def looks_meaningful(user_text: str) -> bool:
         return True
     if words and len(t) >= 4:
         return True
-    return bool(re.search(r"\d", t))
+    # голые цифры без слов — осмысленны только как арифметика / короткий номер
+    if re.fullmatch(r"[\d\s\+\-\*/^=.,()]+", t) and re.search(r"[\+\-\*/^]", t):
+        return True
+    if re.fullmatch(r"\d{1,6}", t):
+        return True
+    return False
 
 
 def tier_floor(user_text: str) -> Tier:
@@ -239,15 +302,19 @@ def tier_floor(user_text: str) -> Tier:
 
     code_request = bool(_CODE_REQUEST_RE.search(t)) or bool(_CODE_RE.search(t))
     requirements = len(_REQUIREMENT_RE.findall(t))
+    debug = bool(_DEBUG_RE.search(t))
+    heavy_code = debug or (code_request and (n > 90 or requirements >= 3))
 
     heavy = (
         n > 400
         or t.count("?") >= 3
         or any(k in low for k in _HEAVY_KEYS)
-        or bool(_DEBUG_RE.search(t))
-        or (code_request and (n > 90 or requirements >= 3))
+        or heavy_code
     )
     if heavy:
+        # Сложный код / отладка — сразу на coder 14b
+        if heavy_code or (code_request and any(k in low for k in _HEAVY_KEYS)):
+            return "coder"
         return "heavy"
 
     mid = (
@@ -261,9 +328,18 @@ def tier_floor(user_text: str) -> Tier:
 
 
 def tier_ceiling(user_text: str) -> Tier:
-    """Потолок тира: просьбу «кратко» не гоняем через 7b без нужды."""
-    if _BRIEF_RE.search(user_text or "") and tier_floor(user_text) != "heavy":
+    """Потолок стартового тира: «кратко» не гоняем через 7b/14b без нужды.
+
+    xlarge в auto появляется только при эскалации после selfcheck, не как старт
+    от роутера 0.5b — кроме явного force_tier.
+    """
+    floor = tier_floor(user_text)
+    if _BRIEF_RE.search(user_text or "") and floor not in {"heavy", "coder", "xlarge"}:
         return "mid"
+    if floor == "coder":
+        return "coder"
+    if floor == "xlarge":
+        return "xlarge"
     return "heavy"
 
 
@@ -271,8 +347,11 @@ def _clamp(tier: Tier, user_text: str) -> Tier:
     floor = tier_floor(user_text)
     ceiling = tier_ceiling(user_text)
     tier = _tier_max(tier, floor)
-    if TIER_ORDER.index(tier) > TIER_ORDER.index(ceiling):
-        tier = ceiling
+    if TIER_RANK[tier] > TIER_RANK[ceiling]:
+        return ceiling
+    # При равном ранге сохраняем специализацию floor (coder vs xlarge)
+    if TIER_RANK[tier] == TIER_RANK[floor] and floor in {"coder", "xlarge"}:
+        return floor
     return tier
 
 
@@ -300,12 +379,27 @@ def _ask_router(model: str, user_text: str, *, timeout: int) -> dict | None:
             fmt=ROUTE_SCHEMA,
             temperature=0.0,
             num_ctx=2048,
-            keep_alive="30m",
+            keep_alive="10m",
             timeout=timeout,
         )
     except Exception:  # noqa: BLE001
         return None
     return _extract_json(msg.get("content") or "")
+
+
+def _tiny_shortcut_reply(user_text: str) -> str | None:
+    t = user_text.strip().lower()
+    if any(k in t for k in ("спасибо", "благодар")) or re.search(
+        r"(?:^|[^\w])thanks(?:[^\w]|$)", t
+    ):
+        return "Пожалуйста!"
+    if any(k in t for k in ("пока",)) or re.search(r"(?:^|[^\w])bye(?:[^\w]|$)", t):
+        return "Пока!"
+    if any(k in t for k in ("привет", "здравствуй", "hello")) or re.search(
+        r"(?:^|[^\w])(?:hi|hey)(?:[^\w]|$)", t
+    ):
+        return "Привет! Чем могу помочь?"
+    return None
 
 
 def route(user_text: str) -> RouteDecision:
@@ -316,22 +410,26 @@ def route(user_text: str) -> RouteDecision:
         )
 
     floor = tier_floor(user_text)
+    web = need_web(user_text)
 
     # Жёсткие лёгкие кейсы — не спрашиваем 0.5b
     if floor == "tiny" and _looks_tiny(user_text):
-        t = user_text.strip().lower()
-        if any(k in t for k in ("привет", "здравствуй", "hello", "hi", "hey")):
-            return RouteDecision(True, "tiny", False, "tiny-shortcut", "Привет! Чем могу помочь?")
-        if any(k in t for k in ("спасибо", "благодар", "thanks")):
-            return RouteDecision(True, "tiny", False, "tiny-shortcut", "Пожалуйста!")
-        if any(k in t for k in ("пока", "bye")):
-            return RouteDecision(True, "tiny", False, "tiny-shortcut", "Пока!")
+        reply = _tiny_shortcut_reply(user_text)
+        if reply:
+            return RouteDecision(True, "tiny", False, "tiny-shortcut", reply)
 
-    # Свежие данные и явно тяжёлые задачи — без участия 0.5b
-    if _looks_web(user_text):
+    # Свежие данные и явно тяжёлые/средние задачи — без участия 0.5b
+    if web:
         return RouteDecision(True, _tier_max("mid", floor), True, "web-shortcut", "")
     if floor == "heavy":
         return RouteDecision(True, "heavy", False, "floor:heavy", "")
+    if floor == "coder":
+        return RouteDecision(True, "coder", False, "floor:coder", "")
+    if floor == "xlarge":
+        return RouteDecision(True, "xlarge", False, "floor:xlarge", "")
+    # Уверенный mid по правилам: 0.5b только тратит время и VRAM
+    if floor == "mid":
+        return RouteDecision(True, _clamp("mid", user_text), False, "floor:mid", "")
 
     data = _ask_router(ROUTE_MODEL, user_text, timeout=120)
     if not data:
@@ -340,7 +438,7 @@ def route(user_text: str) -> RouteDecision:
     ok = bool(data.get("ok", True))
     tier_raw = str(data.get("tier") or "mid").lower().strip()
     tier: Tier = tier_raw if tier_raw in {"tiny", "mid", "heavy"} else "mid"  # type: ignore[assignment]
-    need_web = _looks_web(user_text) or (
+    need = web or (
         bool(data.get("need_web", False)) and bool(_SOFT_WEB_RE.search(user_text))
     )
     reason = " ".join(str(data.get("reason") or "").split())[:80]
@@ -373,9 +471,9 @@ def route(user_text: str) -> RouteDecision:
 
     # Модель могла недооценить сложность — поднимаем до минимума
     tier = _clamp(tier, user_text)
-    if need_web:
+    if need:
         tier = _tier_max(tier, "mid")
     if tier != "tiny":
         reply = ""
 
-    return RouteDecision(ok, tier, need_web, reason or f"floor:{floor}", reply)
+    return RouteDecision(ok, tier, need, reason or f"floor:{floor}", reply)

@@ -10,20 +10,31 @@ alwaysApply: true
 ## Стек
 
 - Ядро: `orchestra.handle` ← `router.py` + `selfcheck.py` + `llm.py` + `tools_web.py`
-- Цикл: `route → worker → selfcheck → retry на тир выше` (до `MAX_ATTEMPTS`)
+- Цикл: `route → plan_worker_context → worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/`
 - Лаунчер: `open_web.py` / `QwenChat.exe` (ждёт `/api/ready`, открывает браузер через Windows API)
 
 ## Тиры
 
-`tiny=qwen2.5:0.5b` · `mid=qwen2.5:3b` · `heavy=qwen2.5:7b`
+`tiny=qwen2.5:0.5b` · `mid=qwen2.5:3b` · `heavy=qwen2.5:7b` · `xlarge=qwen2.5:14b` · `coder=qwen2.5-coder:14b`
+
+Эскалация: tiny → mid → heavy → xlarge; тяжёлый код стартует на `coder`. 14b опциональны для health.
+Неустановленный optional-тир при эскалации/старте пропускается (fallback на ближайший установленный).
+
+## Контекст
+
+`num_ctx = ceil_256(prompt + 128 + reserve_ответа + safety)` ∈ [256…8192]. 
+Приоритет: не обрезать запрос; затем минимум VRAM. История для сложных тиров — только по отсылкам. Логика — `plan_worker_context` в `orchestra.py`.
+Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_url` читает ограниченный объём байт.
 
 ## При изменениях
 
-- Правила выбора модели — только в `router.tier_floor` / `tier_ceiling`
+- Правила выбора модели — только в `router.tier_floor` / `tier_ceiling` (+ shortcuts в `route`)
+- Размер окна / история — только в `plan_worker_context` (+ хелперы рядом)
 - Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`)
 - Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE
 - Не слушать `0.0.0.0`; не добавлять light-theme / auth / code-editor без запроса
 - `start.bat` — CP866 без BOM + `cd /d "%~dp0"`
 - После правок лаунчера пересобрать `QwenChat.exe` (см. AGENTS.md)
+- Документацию держать в синхроне: `README.md`, `AGENTS.md`, этот файл
 - Ответы пользователю — на русском

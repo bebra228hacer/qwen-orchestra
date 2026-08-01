@@ -61,7 +61,7 @@ def web_search(query: str, max_results: int = 5) -> str:
     return "\n".join(lines)
 
 
-def fetch_url(url: str, max_chars: int = 6000) -> str:
+def fetch_url(url: str, max_chars: int = 4000) -> str:
     """Скачать страницу и извлечь текст."""
     url = (url or "").strip()
     if not url.startswith(("http://", "https://")):
@@ -77,10 +77,17 @@ def fetch_url(url: str, max_chars: int = 6000) -> str:
         },
         method="GET",
     )
+    # Читаем ограниченный объём байт (HTML раздут относительно текста)
+    max_bytes = max(max_chars * 8, 64_000)
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
-            raw = resp.read()
+            ctype = (resp.headers.get_content_type() or "").lower()
+            if ctype and not any(
+                x in ctype for x in ("text/", "html", "xml", "json", "javascript")
+            ):
+                return f"Пропуск {url}: нетекстовый Content-Type ({ctype})"
             charset = resp.headers.get_content_charset() or "utf-8"
+            raw = resp.read(max_bytes)
     except urllib.error.HTTPError as exc:
         return f"HTTP ошибка {exc.code} при загрузке {url}"
     except Exception as exc:  # noqa: BLE001

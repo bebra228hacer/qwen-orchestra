@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from llm import installed_models
-from orchestra import MODELS, handle, missing_models
+from orchestra import MODELS, handle, missing_models, missing_optional_models
 from router import Tier
 
 ROOT = Path(__file__).resolve().parent
@@ -52,6 +52,8 @@ class SendMessageBody(BaseModel):
 
 _chats: dict[str, ChatSession] = {}
 _lock = threading.Lock()
+# Один активный ответ на чат — иначе гонка истории при параллельных POST
+_chat_workers: dict[str, threading.Lock] = {}
 
 
 def _now() -> float:
@@ -75,6 +77,31 @@ def _chat_summary(chat: ChatSession) -> dict[str, Any]:
     }
 
 
+def _result_meta(result: Any) -> dict[str, Any]:
+    return {
+        "tier": result.tier,
+        "model": result.model,
+        "need_web": result.need_web,
+        "route_reason": result.route_reason,
+        "escalated": result.escalated,
+        "attempts": result.attempts,
+        "checked": result.checked,
+        "problems": result.problems,
+        "num_ctx": result.num_ctx,
+        "used_history": result.used_history,
+        "context_reason": result.context_reason,
+    }
+
+
+def _worker_lock(chat_id: str) -> threading.Lock:
+    with _lock:
+        lock = _chat_workers.get(chat_id)
+        if lock is None:
+            lock = threading.Lock()
+            _chat_workers[chat_id] = lock
+        return lock
+
+
 @app.get("/api/ready")
 def ready() -> dict[str, bool]:
     """Быстрый ping для лаунчера (без обращения к Ollama)."""
@@ -86,11 +113,14 @@ def health() -> dict[str, Any]:
     ollama_ok = False
     models: list[str] = []
     missing: list[str] = []
+    missing_optional: list[str] = []
     error: str | None = None
     try:
         models = installed_models()
+        have = set(models)
         ollama_ok = True
-        missing = missing_models()
+        missing = missing_models(have)
+        missing_optional = missing_optional_models(have)
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
     return {
@@ -98,6 +128,7 @@ def health() -> dict[str, Any]:
         "ollama": ollama_ok,
         "models": models,
         "missing": missing,
+        "missing_optional": missing_optional,
         "tiers": MODELS,
         "error": error,
     }
@@ -144,6 +175,7 @@ def delete_chat(chat_id: str) -> dict[str, str]:
         if chat_id not in _chats:
             raise HTTPException(404, "Chat not found")
         del _chats[chat_id]
+        _chat_workers.pop(chat_id, None)
     return {"status": "ok"}
 
 
@@ -223,6 +255,22 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "model": payload.get("model"),
                         "need_web": payload.get("need_web"),
                         "phase": "worker",
+                        "num_ctx": payload.get("num_ctx"),
+                        "used_history": payload.get("used_history"),
+                    },
+                )
+            )
+        elif event == "context":
+            q.put(
+                (
+                    "meta",
+                    {
+                        "phase": "context",
+                        "num_ctx": payload.get("num_ctx"),
+                        "used_history": payload.get("used_history"),
+                        "context_reason": payload.get("reason"),
+                        "history_messages": payload.get("history_messages"),
+                        "tier": payload.get("tier"),
                     },
                 )
             )
@@ -259,14 +307,20 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                 (
                     "meta",
                     {
-                        "phase": "retry",
+                        "phase": "restore",
                         "model": payload.get("model"),
                         "tier": payload.get("tier"),
+                        "problems": [],
                     },
                 )
             )
 
     def worker() -> None:
+        wlock = _worker_lock(chat_id)
+        if not wlock.acquire(blocking=False):
+            q.put(("error", {"message": "Дождитесь ответа на предыдущее сообщение в этом чате"}))
+            q.put(None)
+            return
         try:
             result = handle(
                 content,
@@ -277,6 +331,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                 on_token=on_token,
                 on_status=on_status,
             )
+            meta = _result_meta(result)
             with _lock:
                 c = _chats.get(chat_id)
                 if c is not None:
@@ -284,40 +339,17 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         ChatMessage(
                             role="assistant",
                             content=result.text,
-                            meta={
-                                "tier": result.tier,
-                                "model": result.model,
-                                "need_web": result.need_web,
-                                "route_reason": result.route_reason,
-                                "escalated": result.escalated,
-                                "attempts": result.attempts,
-                                "checked": result.checked,
-                                "problems": result.problems,
-                            },
+                            meta=meta,
                         )
                     )
                     c.updated_at = _now()
-            q.put(
-                (
-                    "done",
-                    {
-                        "text": result.text,
-                        "tier": result.tier,
-                        "model": result.model,
-                        "need_web": result.need_web,
-                        "route_reason": result.route_reason,
-                        "escalated": result.escalated,
-                        "attempts": result.attempts,
-                        "checked": result.checked,
-                        "problems": result.problems,
-                    },
-                )
-            )
+            q.put(("done", {"text": result.text, **meta}))
         except urllib.error.URLError as exc:
             q.put(("error", {"message": f"Ollama недоступна: {exc}"}))
         except Exception as exc:  # noqa: BLE001
             q.put(("error", {"message": str(exc)}))
         finally:
+            wlock.release()
             q.put(None)
 
     threading.Thread(target=worker, daemon=True).start()
