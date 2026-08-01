@@ -1,0 +1,29 @@
+---
+description: Контекст Qwen Orchestra — оркестр Ollama + веб-чат Cursor UI
+alwaysApply: true
+---
+
+# Qwen Orchestra
+
+Локальный оркестр Qwen через Ollama + веб-чат. Полная карта: [AGENTS.md](AGENTS.md).
+
+## Стек
+
+- Ядро: `orchestra.handle` ← `router.py` + `selfcheck.py` + `llm.py` + `tools_web.py`
+- Цикл: `route → worker → selfcheck → retry на тир выше` (до `MAX_ATTEMPTS`)
+- Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/`
+- Лаунчер: `open_web.py` / `QwenChat.exe` (ждёт `/api/ready`, открывает браузер через Windows API)
+
+## Тиры
+
+`tiny=qwen2.5:0.5b` · `mid=qwen2.5:3b` · `heavy=qwen2.5:7b`
+
+## При изменениях
+
+- Правила выбора модели — только в `router.tier_floor` / `tier_ceiling`
+- Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`)
+- Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE
+- Не слушать `0.0.0.0`; не добавлять light-theme / auth / code-editor без запроса
+- `start.bat` — CP866 без BOM + `cd /d "%~dp0"`
+- После правок лаунчера пересобрать `QwenChat.exe` (см. AGENTS.md)
+- Ответы пользователю — на русском

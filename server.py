@@ -1,0 +1,369 @@
+"""Локальный веб-сервер: Cursor-like UI + оркестр (только 127.0.0.1)."""
+
+from __future__ import annotations
+
+import json
+import threading
+import time
+import uuid
+from pathlib import Path
+from queue import Empty, Queue
+from typing import Any, Iterator
+
+import urllib.error
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from llm import installed_models
+from orchestra import MODELS, handle, missing_models
+from router import Tier
+
+ROOT = Path(__file__).resolve().parent
+WEB_DIR = ROOT / "web"
+
+app = FastAPI(title="Qwen Orchestra Chat", docs_url=None, redoc_url=None)
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    meta: dict[str, Any] | None = None
+
+
+class ChatSession(BaseModel):
+    id: str
+    title: str
+    created_at: float
+    updated_at: float
+    messages: list[ChatMessage] = Field(default_factory=list)
+
+
+class CreateChatBody(BaseModel):
+    title: str | None = None
+
+
+class SendMessageBody(BaseModel):
+    content: str
+    force_tier: Tier | None = None
+
+
+_chats: dict[str, ChatSession] = {}
+_lock = threading.Lock()
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _title_from(text: str) -> str:
+    t = " ".join(text.strip().split())
+    if not t:
+        return "New Chat"
+    return t[:48] + ("…" if len(t) > 48 else "")
+
+
+def _chat_summary(chat: ChatSession) -> dict[str, Any]:
+    return {
+        "id": chat.id,
+        "title": chat.title,
+        "created_at": chat.created_at,
+        "updated_at": chat.updated_at,
+        "message_count": len(chat.messages),
+    }
+
+
+@app.get("/api/ready")
+def ready() -> dict[str, bool]:
+    """Быстрый ping для лаунчера (без обращения к Ollama)."""
+    return {"ok": True}
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    ollama_ok = False
+    models: list[str] = []
+    missing: list[str] = []
+    error: str | None = None
+    try:
+        models = installed_models()
+        ollama_ok = True
+        missing = missing_models()
+    except Exception as exc:  # noqa: BLE001
+        error = str(exc)
+    return {
+        "ok": ollama_ok and not missing,
+        "ollama": ollama_ok,
+        "models": models,
+        "missing": missing,
+        "tiers": MODELS,
+        "error": error,
+    }
+
+
+@app.get("/api/chats")
+def list_chats() -> list[dict[str, Any]]:
+    with _lock:
+        chats = sorted(_chats.values(), key=lambda c: c.updated_at, reverse=True)
+        return [_chat_summary(c) for c in chats]
+
+
+@app.post("/api/chats")
+def create_chat(body: CreateChatBody | None = None) -> dict[str, Any]:
+    body = body or CreateChatBody()
+    chat_id = uuid.uuid4().hex[:12]
+    ts = _now()
+    chat = ChatSession(
+        id=chat_id,
+        title=(body.title or "New Chat").strip() or "New Chat",
+        created_at=ts,
+        updated_at=ts,
+    )
+    with _lock:
+        _chats[chat_id] = chat
+    return _chat_summary(chat)
+
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str) -> dict[str, Any]:
+    with _lock:
+        chat = _chats.get(chat_id)
+        if not chat:
+            raise HTTPException(404, "Chat not found")
+        return {
+            **_chat_summary(chat),
+            "messages": [m.model_dump() for m in chat.messages],
+        }
+
+
+@app.delete("/api/chats/{chat_id}")
+def delete_chat(chat_id: str) -> dict[str, str]:
+    with _lock:
+        if chat_id not in _chats:
+            raise HTTPException(404, "Chat not found")
+        del _chats[chat_id]
+    return {"status": "ok"}
+
+
+@app.post("/api/chats/{chat_id}/clear")
+def clear_chat(chat_id: str) -> dict[str, Any]:
+    with _lock:
+        chat = _chats.get(chat_id)
+        if not chat:
+            raise HTTPException(404, "Chat not found")
+        chat.messages.clear()
+        chat.title = "New Chat"
+        chat.updated_at = _now()
+        return _chat_summary(chat)
+
+
+def _sse(event: str, data: dict[str, Any] | str) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@app.post("/api/chats/{chat_id}/messages")
+def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
+    content = (body.content or "").strip()
+    if not content:
+        raise HTTPException(400, "Empty message")
+
+    with _lock:
+        chat = _chats.get(chat_id)
+        if not chat:
+            raise HTTPException(404, "Chat not found")
+        history = [
+            {"role": m.role, "content": m.content}
+            for m in chat.messages
+            if m.role in {"user", "assistant"}
+        ]
+        if chat.title == "New Chat":
+            chat.title = _title_from(content)
+        chat.messages.append(ChatMessage(role="user", content=content))
+        chat.updated_at = _now()
+
+    q: Queue[tuple[str, Any] | None] = Queue()
+
+    def on_token(token: str) -> None:
+        q.put(("token", {"text": token}))
+
+    def on_status(event: str, payload: dict[str, Any]) -> None:
+        if event == "route":
+            q.put(
+                (
+                    "meta",
+                    {
+                        "tier": payload.get("tier"),
+                        "model": payload.get("model"),
+                        "need_web": payload.get("need_web"),
+                        "route_reason": payload.get("reason"),
+                        "ok": payload.get("ok"),
+                    },
+                )
+            )
+        elif event == "tool":
+            q.put(
+                (
+                    "tool",
+                    {
+                        "name": payload.get("name"),
+                        "arguments": payload.get("arguments"),
+                        "model": payload.get("model"),
+                    },
+                )
+            )
+        elif event == "worker":
+            q.put(
+                (
+                    "meta",
+                    {
+                        "tier": payload.get("tier"),
+                        "model": payload.get("model"),
+                        "need_web": payload.get("need_web"),
+                        "phase": "worker",
+                    },
+                )
+            )
+        elif event == "selfcheck":
+            q.put(
+                (
+                    "check",
+                    {
+                        "ok": payload.get("ok"),
+                        "problems": payload.get("problems") or [],
+                        "note": payload.get("note") or "",
+                        "attempt": payload.get("attempt"),
+                        "model": payload.get("model"),
+                    },
+                )
+            )
+        elif event == "retry":
+            # phase=retry — сигнал UI очистить забракованный текст
+            q.put(
+                (
+                    "meta",
+                    {
+                        "phase": "retry",
+                        "from_model": payload.get("from_model"),
+                        "model": payload.get("to_model"),
+                        "attempt": payload.get("attempt"),
+                        "problems": payload.get("problems") or [],
+                        "escalated": True,
+                    },
+                )
+            )
+        elif event == "restore":
+            q.put(
+                (
+                    "meta",
+                    {
+                        "phase": "retry",
+                        "model": payload.get("model"),
+                        "tier": payload.get("tier"),
+                    },
+                )
+            )
+
+    def worker() -> None:
+        try:
+            result = handle(
+                content,
+                history,
+                force_tier=body.force_tier,
+                stream=True,
+                verbose=False,
+                on_token=on_token,
+                on_status=on_status,
+            )
+            with _lock:
+                c = _chats.get(chat_id)
+                if c is not None:
+                    c.messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            content=result.text,
+                            meta={
+                                "tier": result.tier,
+                                "model": result.model,
+                                "need_web": result.need_web,
+                                "route_reason": result.route_reason,
+                                "escalated": result.escalated,
+                                "attempts": result.attempts,
+                                "checked": result.checked,
+                                "problems": result.problems,
+                            },
+                        )
+                    )
+                    c.updated_at = _now()
+            q.put(
+                (
+                    "done",
+                    {
+                        "text": result.text,
+                        "tier": result.tier,
+                        "model": result.model,
+                        "need_web": result.need_web,
+                        "route_reason": result.route_reason,
+                        "escalated": result.escalated,
+                        "attempts": result.attempts,
+                        "checked": result.checked,
+                        "problems": result.problems,
+                    },
+                )
+            )
+        except urllib.error.URLError as exc:
+            q.put(("error", {"message": f"Ollama недоступна: {exc}"}))
+        except Exception as exc:  # noqa: BLE001
+            q.put(("error", {"message": str(exc)}))
+        finally:
+            q.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def event_stream() -> Iterator[str]:
+        while True:
+            try:
+                item = q.get(timeout=600)
+            except Empty:
+                yield _sse("error", {"message": "Timeout"})
+                break
+            if item is None:
+                break
+            event, data = item
+            yield _sse(event, data)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(WEB_DIR / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+
+def main() -> None:
+    import uvicorn
+
+    uvicorn.run(
+        "server:app",
+        host="127.0.0.1",
+        port=8787,
+        reload=False,
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    main()

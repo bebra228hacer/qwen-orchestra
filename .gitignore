@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# PyInstaller / build artifacts
+build/
+dist/
+*.spec
+
+# Local launcher binary (rebuild from open_web.py)
+QwenChat.exe
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini

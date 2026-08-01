@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Qwen Orchestra</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="brand">Qwen Orchestra</div>
+        <button type="button" class="btn btn-primary" id="btn-new">New Chat</button>
+      </div>
+      <nav class="chat-list" id="chat-list" aria-label="Чаты"></nav>
+      <div class="sidebar-bottom">
+        <label class="field-label" for="tier-select">Tier</label>
+        <select id="tier-select" class="tier-select">
+          <option value="auto">Auto</option>
+          <option value="tiny">tiny · 0.5b</option>
+          <option value="mid">mid · 3b</option>
+          <option value="heavy">heavy · 7b</option>
+        </select>
+        <div class="health" id="health" title="Статус Ollama">Проверка…</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="main-header">
+        <h1 class="chat-title" id="chat-title">New Chat</h1>
+        <div class="header-actions">
+          <button type="button" class="btn btn-ghost" id="btn-clear" title="Очистить чат">Clear</button>
+          <button type="button" class="btn btn-ghost danger" id="btn-delete" title="Удалить чат">Delete</button>
+        </div>
+      </header>
+
+      <section class="messages" id="messages" aria-live="polite"></section>
+
+      <footer class="composer-wrap">
+        <div class="composer">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="Спросите оркестр… (Enter — отправить, Shift+Enter — новая строка)"
+            autocomplete="off"
+          ></textarea>
+          <button type="button" class="btn btn-send" id="btn-send" disabled>Send</button>
+        </div>
+        <div class="composer-hint" id="status-line">localhost · оркестр tiny → mid → heavy</div>
+      </footer>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
