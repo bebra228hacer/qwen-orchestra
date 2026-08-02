@@ -13,12 +13,14 @@
 1. Сервис **Ollama** запущен (`http://localhost:11434`).
 2. Модели: `qwen3.5:0.8b`, `qwen3.5:4b`, `qwen3.5:9b` (`ollama pull …`).
 3. Опционально: `qwen2.5:14b`, `qwen2.5-coder:14b` (тиры `xlarge` / `coder`, Q4_K_M ~9 ГБ).
-4. Python deps: `pip install -r requirements.txt` (`ddgs`, `fastapi`, `uvicorn`, `pydantic`).
+4. Python deps: `pip install -r requirements.txt` (`ddgs`, `fastapi`, `uvicorn`, `pydantic`, `psutil`).
 5. Фронтенд (vendored, без npm): см. `web/vendor/` —
    - `marked.min.js` — Markdown (GFM);
    - `purify.min.js` — DOMPurify, санитизация HTML;
-   - `highlight.min.js` + `highlight-github-dark.min.css` — подсветка кода.
+   - `highlight.min.js` + `highlight-github-dark.min.css` — подсветка кода;
+   - `katex/` — KaTeX + auto-render + fonts (формулы `$…$` / `$$…$$`).
    Подключение в `web/index.html`; CDN не нужен (офлайн-чат).
+6. Для GPU-метрик в правой панели — NVIDIA + `nvidia-smi` в PATH (иначе секция GPU пустая).
 
 На GPU ~8 ГБ VRAM 14b часто идёт как hybrid CPU/GPU — скорость ниже, чем у 9b на 100% GPU.
 
@@ -31,14 +33,15 @@
 | `router.py` | Роутер на tiny + `tier_floor` / `tier_ceiling`; SYSTEM из settings |
 | `selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на mid (4b) |
 | `llm.py` | Клиент Ollama: `chat`, `chat_stream`, `installed_models` (+ `think: false` для Qwen3.5) |
+| `metrics.py` | CPU/RAM (`psutil`), GPU (`nvidia-smi`), Ollama `/api/ps` для панели монитора |
 | `tools_web.py` | `web_search`, `fetch_url` |
 | `orchestra_chat.py` | CLI оркестра |
 | `ask_orchestra.py` | Один вопрос через оркестр |
 | `chat.py` / `ask_once.py` | Только mid (4b), без оркестра |
 | `chat_web.py` / `ask_web.py` | Только mid + web tools |
-| `server.py` | FastAPI: статика + API чатов + SSE + `/api/settings` |
-| `web/` | UI: `index.html`, `styles.css`, `app.js` |
-| `web/vendor/` | Фронт-библиотеки: marked, DOMPurify, highlight.js (+ тема) |
+| `server.py` | FastAPI: статика + API чатов + SSE + `/api/settings` + `/api/metrics` |
+| `web/` | UI: `index.html`, `styles.css`, `app.js` (чат + правая панель монитора) |
+| `web/vendor/` | Фронт-библиотеки: marked, DOMPurify, highlight.js, KaTeX (+ тема/шрифты) |
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
 | `QwenChat.exe` / `QwenChat.bat` | Сборка/обёртка лаунчера |
 | `start.bat` | Меню режимов (CP866, `cd /d "%~dp0"`) |
@@ -169,6 +172,7 @@ Web-tool результаты **кэшируются** между retry (пов�
 |---|---|---|
 | GET | `/api/ready` | Быстрый ping (лаунчер; **без** Ollama) |
 | GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `slots` |
+| GET | `/api/metrics` | CPU / RAM / GPU / загруженные модели Ollama (`/api/ps`) |
 | GET/PUT | `/api/settings` | Слоты моделей + `router_model` + промпты роутера (`settings.json`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
 | POST | `/api/settings/slots` | Добавить нейронку в список |
@@ -190,9 +194,23 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 `/api/health`: `ok` = Ollama доступна и нет **обязательных** missing; `missing_optional` — 14b/coder.
 Один запрос `/api/tags` на health (список моделей переиспользуется).
 
+`/api/metrics`: снимок для правой панели — `cpu`, `ram`, `gpu[]` (nvidia-smi), `ollama.models[]`
+с `gpu_ratio`/`cpu_ratio`/`place` (из `size_vram`/`size`). Кэш ~0.6 с. Без NVIDIA GPU-секция пустая.
+
 Параллельные сообщения в одном чате сериализуются (второй POST получит ошибку, пока идёт первый).
 
 Чаты **in-memory** (пропадают при рестарте процесса).
+
+## Правая панель (монитор)
+
+Трёхколоночный layout: сайдбар · чат · монитор. По умолчанию открыта.
+
+- Секции: нейронки в Ollama (где крутятся + доля GPU/CPU), GPU/VRAM, RAM, CPU + sparklines.
+- Ширина регулируется drag-ресайзером (220–960px, по ширине окна); частота опроса — селект 1…10 с.
+- Высота каждого sparkline — отдельный вертикальный ресайзер (сохраняется в `localStorage`).
+- Одна кнопка toggle `›`/`‹` в левом верхнем углу панели (свернуть / развернуть); в свёрнутом виде остаётся узкая полоска 40px.
+- Настройки (`open` / `width` / `interval` / высоты графиков) в `localStorage` (`qwen.monitor.*`).
+- Poll только когда панель открыта; метрики **не** через SSE чата.
 
 ## Запуск
 
@@ -227,6 +245,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 - Один локальный пользователь, без auth.
 - Нет редактора кода / файлового дерева / диффов (пока).
 - Визуал: Cursor-like (серый/уголь), без фиолетовых AI-градиентов.
+- Правая панель — монитор ресурсов (не Tools/Logs); свёртываемая, ресайз.
 
 ## Правила изменений для агентов
 
@@ -248,6 +267,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 
 - Персистентность чатов (SQLite), контракт API сохранить.
 - Реестр многих моделей/агентов (`/api/agents`).
-- Правая панель Tools/Logs.
+- В правой панели — вкладки Tools/Logs рядом с монитором.
 - Редактор кода — отдельный этап по запросу.
 - Точный подсчёт токенов через токенизатор модели вместо эвристики символов.
+- GPU-метрики для AMD/Intel (сейчас только NVIDIA / nvidia-smi).

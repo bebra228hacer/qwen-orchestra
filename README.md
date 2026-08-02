@@ -51,6 +51,7 @@ python -m pip install -r requirements.txt
 | `web/vendor/purify.min.js` | [DOMPurify](https://github.com/cure53/DOMPurify) v3 | Санитизация HTML (XSS) |
 | `web/vendor/highlight.min.js` | [highlight.js](https://github.com/highlightjs/highlight.js) v11 | Подсветка синтаксиса в блоках кода |
 | `web/vendor/highlight-github-dark.min.css` | hljs theme **GitHub Dark** | Цвета токенов под тёмный UI |
+| `web/vendor/katex/` | [KaTeX](https://katex.org/) 0.16 | Формулы `$…$` / `$$…$$` (css, js, auto-render, fonts) |
 
 Подключаются из `web/index.html`. Обновлять версии — скачать те же артефакты с jsDelivr / CDN release и заменить файлы в `web/vendor/`.
 
@@ -116,7 +117,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 ### Веб-UI
 
 - Слева — чаты (очистка/удаление у каждого пункта), снизу — Composer
-- Ответы и сообщения рендерятся как **Markdown** (GFM: код, списки, таблицы; `marked` + `DOMPurify` + подсветка `highlight.js` в `web/vendor/`)
+- Ответы и сообщения рендерятся как **Markdown** (GFM: код, списки, таблицы; `marked` + `DOMPurify` + `highlight.js`) и **LaTeX-формулы** (`KaTeX`, `$…$` / `$$…$$`) из `web/vendor/`
 - Селектор **Auto / tiny / mid / heavy / xlarge / coder**
 - Чипы: tier, модель, `ctx N`, `история` / `без истории`, `проверено`, `попыток: N`
 - Health: обязательные модели отдельно; 14b — «опционально», если не скачаны
@@ -178,8 +179,9 @@ num_ctx = ceil_256(tokens(промпт) + 128 + reserve_ответа + safety) �
 | `router.py` | Выбор tier + валидация |
 | `selfcheck.py` | Самопроверка ответа |
 | `llm.py` | Клиент Ollama (`num_ctx` в options) |
-| `server.py` | FastAPI + SSE, порт `8787` |
-| `web/` | Тёмный Cursor-like UI |
+| `metrics.py` | Метрики CPU/RAM/GPU + Ollama `/api/ps` |
+| `server.py` | FastAPI + SSE + `/api/metrics`, порт `8787` |
+| `web/` | Тёмный Cursor-like UI (чат + правая панель монитора) |
 | `open_web.py` | Лаунчер: Ollama (если нужно) + сервер + браузер |
 | `AGENTS.md` | Карта для AI-агентов |
 

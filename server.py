@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from llm import installed_models
+from metrics import collect as collect_metrics
 from orchestra import MODELS, handle, missing_models, missing_optional_models
 import settings as app_settings
 
@@ -147,6 +148,12 @@ def health() -> dict[str, Any]:
         "slots": [s.to_dict() for s in app_settings.get_settings().slots],
         "error": error,
     }
+
+
+@app.get("/api/metrics")
+def metrics() -> dict[str, Any]:
+    """CPU / RAM / GPU / загруженные в Ollama модели (для правой панели)."""
+    return collect_metrics()
 
 
 @app.get("/api/settings")

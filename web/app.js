@@ -2,6 +2,7 @@
   const $ = (sel) => document.querySelector(sel);
 
   const els = {
+    app: $(".app"),
     chatList: $("#chat-list"),
     chatTitle: $("#chat-title"),
     messages: $("#messages"),
@@ -28,7 +29,28 @@
     addSlotLabel: $("#add-slot-label"),
     addSlotPrompt: $("#add-slot-prompt"),
     addSlotAuto: $("#add-slot-auto"),
+    monitorPanel: $("#monitor-panel"),
+    panelResizer: $("#panel-resizer"),
+    btnPanelToggle: $("#btn-panel-toggle"),
+    metricsInterval: $("#metrics-interval"),
+    metricsOllama: $("#metrics-ollama"),
+    metricsGpu: $("#metrics-gpu"),
+    metricsRam: $("#metrics-ram"),
+    metricsCpu: $("#metrics-cpu"),
+    metricsNote: $("#metrics-note"),
   };
+
+  const LS_PANEL_OPEN = "qwen.monitor.open";
+  const LS_PANEL_WIDTH = "qwen.monitor.width";
+  const LS_METRICS_INTERVAL = "qwen.monitor.interval";
+  const LS_CHART_HEIGHTS = "qwen.monitor.chartHeights";
+  const PANEL_MIN = 220;
+  const PANEL_MAX_CAP = 960;
+  const PANEL_DEFAULT = 300;
+  const HISTORY_LEN = 60;
+  const SPARK_H_MIN = 28;
+  const SPARK_H_MAX = 280;
+  const SPARK_H_DEFAULT = 48;
 
   const state = {
     chats: [],
@@ -38,6 +60,21 @@
     ollamaModels: [],
     slots: [],
     routerModel: "",
+    panelOpen: true,
+    panelWidth: PANEL_DEFAULT,
+    metricsTimer: null,
+    metricsHistory: {
+      cpu: [],
+      ram: [],
+      gpuUtil: [],
+      gpuMem: [],
+    },
+    chartHeights: {
+      "spark-gpu": SPARK_H_DEFAULT,
+      "spark-vram": SPARK_H_DEFAULT,
+      "spark-ram": SPARK_H_DEFAULT,
+      "spark-cpu": SPARK_H_DEFAULT,
+    },
   };
 
   function forceTier() {
@@ -203,7 +240,39 @@
     }
     enhanceCodeBlocks(el);
     highlightCodeBlocks(el, { streaming, text: src });
+    renderMathInMsg(el);
     if (streaming) placeStreamCaret(el, src);
+  }
+
+  /** LaTeX $…$ / $$…$$ → KaTeX (после sanitize; в code/pre не трогаем). */
+  function renderMathInMsg(el) {
+    if (typeof renderMathInElement !== "function") return;
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+        ],
+        throwOnError: false,
+        ignoredTags: [
+          "script",
+          "noscript",
+          "style",
+          "textarea",
+          "pre",
+          "code",
+          "kbd",
+          "samp",
+          "annotation",
+          "annotation-xml",
+        ],
+        ignoredClasses: ["code-block", "code-copy"],
+      });
+    } catch (_) {
+      /* неполная формула при стриме — оставляем сырой текст */
+    }
   }
 
   async function copyCodeBlock(btn) {
@@ -1010,7 +1079,502 @@
     if (e.key === "Escape" && !els.modelsModal.hidden) closeModelsModal();
   });
 
+  /* —— Monitor panel —— */
+
+  function pushHistory(key, value) {
+    const arr = state.metricsHistory[key];
+    if (!arr) return;
+    const n = value == null || Number.isNaN(value) ? null : Number(value);
+    arr.push(n);
+    while (arr.length > HISTORY_LEN) arr.shift();
+  }
+
+  function drawSparkline(canvas, values, color) {
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth || 200;
+    const cssH = canvas.clientHeight || 36;
+    if (canvas.width !== Math.floor(cssW * dpr) || canvas.height !== Math.floor(cssH * dpr)) {
+      canvas.width = Math.floor(cssW * dpr);
+      canvas.height = Math.floor(cssH * dpr);
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const pts = values.filter((v) => v != null);
+    if (pts.length < 2) {
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.35;
+      ctx.beginPath();
+      ctx.moveTo(0, cssH * 0.7);
+      ctx.lineTo(cssW, cssH * 0.7);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      return;
+    }
+
+    const min = 0;
+    const max = Math.max(100, ...pts);
+    const pad = 2;
+    const n = values.length;
+    const coords = [];
+    for (let i = 0; i < n; i++) {
+      const v = values[i];
+      if (v == null) {
+        coords.push(null);
+        continue;
+      }
+      const x = (i / Math.max(1, n - 1)) * cssW;
+      const y = cssH - pad - ((v - min) / (max - min)) * (cssH - pad * 2);
+      coords.push({ x, y });
+    }
+
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.12;
+    ctx.beginPath();
+    let fillStarted = false;
+    let first = null;
+    let last = null;
+    for (const c of coords) {
+      if (!c) {
+        if (fillStarted && first && last) {
+          ctx.lineTo(last.x, cssH);
+          ctx.lineTo(first.x, cssH);
+          ctx.closePath();
+          ctx.fill();
+          ctx.beginPath();
+        }
+        fillStarted = false;
+        first = null;
+        last = null;
+        continue;
+      }
+      if (!fillStarted) {
+        ctx.moveTo(c.x, c.y);
+        first = c;
+        fillStarted = true;
+      } else {
+        ctx.lineTo(c.x, c.y);
+      }
+      last = c;
+    }
+    if (fillStarted && first && last) {
+      ctx.lineTo(last.x, cssH);
+      ctx.lineTo(first.x, cssH);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    let strokeStarted = false;
+    for (const c of coords) {
+      if (!c) {
+        strokeStarted = false;
+        continue;
+      }
+      if (!strokeStarted) {
+        ctx.moveTo(c.x, c.y);
+        strokeStarted = true;
+      } else {
+        ctx.lineTo(c.x, c.y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  function pctBar(cls, pct) {
+    const p = Math.max(0, Math.min(100, pct == null ? 0 : Number(pct)));
+    return `<div class="monitor-bar ${cls}"><span style="width:${p}%"></span></div>`;
+  }
+
+  function fmtPct(v) {
+    if (v == null || Number.isNaN(v)) return "—";
+    return `${Number(v).toFixed(0)}%`;
+  }
+
+  function sparkHeight(id) {
+    const h = state.chartHeights[id];
+    return h != null ? h : SPARK_H_DEFAULT;
+  }
+
+  function sparkHtml(id, title) {
+    const h = sparkHeight(id);
+    const t = title ? ` title="${escapeHtml(title)}"` : "";
+    return `<div class="monitor-spark-wrap" data-spark="${escapeHtml(id)}" style="--spark-h:${h}px">
+      <canvas class="monitor-spark" id="${escapeHtml(id)}"${t}></canvas>
+      <div class="spark-resizer" data-spark="${escapeHtml(id)}" title="Тяните, чтобы изменить высоту"></div>
+    </div>`;
+  }
+
+  function chartColor(varName, fallback) {
+    return getComputedStyle(document.documentElement).getPropertyValue(varName).trim() || fallback;
+  }
+
+  function paintSpark(id, values, color) {
+    drawSparkline(document.getElementById(id), values, color);
+  }
+
+  function saveChartHeights() {
+    try {
+      localStorage.setItem(LS_CHART_HEIGHTS, JSON.stringify(state.chartHeights));
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function loadChartHeights() {
+    try {
+      const raw = localStorage.getItem(LS_CHART_HEIGHTS);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return;
+      for (const [k, v] of Object.entries(parsed)) {
+        const n = Number(v);
+        if (n >= SPARK_H_MIN && n <= SPARK_H_MAX) state.chartHeights[k] = Math.round(n);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function renderOllama(data) {
+    const box = els.metricsOllama;
+    if (!data || !data.ok) {
+      box.innerHTML = `<div class="monitor-empty">Ollama: ${escapeHtml(
+        (data && data.error) || "недоступна"
+      )}</div>`;
+      return;
+    }
+    const models = data.models || [];
+    if (!models.length) {
+      box.innerHTML = `<div class="monitor-empty">Нет загруженных моделей</div>`;
+      return;
+    }
+    box.innerHTML = models
+      .map((m) => {
+        const gpuPct = Math.round((m.gpu_ratio || 0) * 100);
+        const cpuPct = Math.round((m.cpu_ratio || 0) * 100);
+        const place =
+          m.place === "GPU"
+            ? "100% GPU"
+            : m.place === "CPU"
+              ? "100% CPU"
+              : `${gpuPct}% GPU · ${cpuPct}% CPU`;
+        return `<div class="monitor-card">
+          <div class="monitor-metric-head">
+            <span class="monitor-metric-name" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</span>
+            <span class="monitor-metric-value">${escapeHtml(m.place || "?")}</span>
+          </div>
+          <div class="monitor-split" title="${escapeHtml(place)}">
+            <span class="gpu-part" style="width:${gpuPct}%"></span>
+            <span class="cpu-part" style="width:${cpuPct}%"></span>
+          </div>
+          <div class="monitor-place">${escapeHtml(place)} · VRAM ${escapeHtml(
+            String(m.size_vram_mb ?? "—")
+          )} / ${escapeHtml(String(m.size_mb ?? "—"))} МБ</div>
+        </div>`;
+      })
+      .join("");
+  }
+
+  function renderGpu(gpus) {
+    const box = els.metricsGpu;
+    if (!gpus || !gpus.length) {
+      pushHistory("gpuUtil", null);
+      pushHistory("gpuMem", null);
+      box.innerHTML = `<div class="monitor-empty">Нет данных GPU (нужен nvidia-smi)</div>
+        ${sparkHtml("spark-gpu", "Загрузка GPU %")}`;
+      paintSpark("spark-gpu", state.metricsHistory.gpuUtil, chartColor("--chart-gpu", "#4a9eff"));
+      return;
+    }
+    const g = gpus[0];
+    pushHistory("gpuUtil", g.util_percent);
+    pushHistory("gpuMem", g.mem_percent);
+    const usedGb = (g.mem_used_mb / 1024).toFixed(1);
+    const totalGb = (g.mem_total_mb / 1024).toFixed(1);
+    box.innerHTML = `
+      <div class="monitor-card">
+        <div class="monitor-metric-head">
+          <span class="monitor-metric-name" title="${escapeHtml(g.name)}">${escapeHtml(g.name)}</span>
+          <span class="monitor-metric-value">${fmtPct(g.util_percent)}</span>
+        </div>
+        ${pctBar("gpu", g.util_percent)}
+        <div class="monitor-metric-head">
+          <span>VRAM</span>
+          <span class="monitor-metric-value">${usedGb} / ${totalGb} ГБ · ${fmtPct(g.mem_percent)}</span>
+        </div>
+        ${pctBar("vram", g.mem_percent)}
+        ${sparkHtml("spark-gpu", "Загрузка GPU %")}
+        ${sparkHtml("spark-vram", "VRAM %")}
+      </div>`;
+    paintSpark("spark-gpu", state.metricsHistory.gpuUtil, chartColor("--chart-gpu", "#4a9eff"));
+    paintSpark("spark-vram", state.metricsHistory.gpuMem, chartColor("--chart-vram", "#7ec699"));
+  }
+
+  function renderRam(ram) {
+    const box = els.metricsRam;
+    const pct = ram && ram.percent != null ? ram.percent : null;
+    pushHistory("ram", pct);
+    if (pct == null) {
+      box.innerHTML = `<div class="monitor-empty">Нет данных RAM</div>`;
+      return;
+    }
+    box.innerHTML = `
+      <div class="monitor-card">
+        <div class="monitor-metric-head">
+          <span class="monitor-metric-name">Оперативная память</span>
+          <span class="monitor-metric-value">${ram.used_gb} / ${ram.total_gb} ГБ · ${fmtPct(pct)}</span>
+        </div>
+        ${pctBar("ram", pct)}
+        ${sparkHtml("spark-ram", "RAM %")}
+      </div>`;
+    paintSpark("spark-ram", state.metricsHistory.ram, chartColor("--chart-ram", "#d4a574"));
+  }
+
+  function renderCpu(cpu) {
+    const box = els.metricsCpu;
+    const pct = cpu && cpu.percent != null ? cpu.percent : null;
+    pushHistory("cpu", pct);
+    if (pct == null) {
+      box.innerHTML = `<div class="monitor-empty">Нет данных CPU</div>`;
+      return;
+    }
+    const cores = cpu.count != null ? ` · ${cpu.count} ядр.` : "";
+    box.innerHTML = `
+      <div class="monitor-card">
+        <div class="monitor-metric-head">
+          <span class="monitor-metric-name">CPU${escapeHtml(cores)}</span>
+          <span class="monitor-metric-value">${fmtPct(pct)}</span>
+        </div>
+        ${pctBar("cpu", pct)}
+        ${sparkHtml("spark-cpu", "CPU %")}
+      </div>`;
+    paintSpark("spark-cpu", state.metricsHistory.cpu, chartColor("--chart-cpu", "#e06c75"));
+  }
+
+  async function refreshMetrics() {
+    if (!state.panelOpen) return;
+    try {
+      const data = await api("/api/metrics");
+      renderOllama(data.ollama);
+      renderGpu(data.gpu);
+      renderRam(data.ram);
+      renderCpu(data.cpu);
+      if (data.note) {
+        els.metricsNote.hidden = false;
+        els.metricsNote.textContent = data.note;
+      } else {
+        els.metricsNote.hidden = true;
+        els.metricsNote.textContent = "";
+      }
+    } catch (e) {
+      els.metricsOllama.innerHTML = `<div class="monitor-empty">Ошибка: ${escapeHtml(e.message)}</div>`;
+    }
+  }
+
+  function stopMetricsPoll() {
+    if (state.metricsTimer) {
+      clearInterval(state.metricsTimer);
+      state.metricsTimer = null;
+    }
+  }
+
+  function startMetricsPoll() {
+    stopMetricsPoll();
+    if (!state.panelOpen) return;
+    const ms = Number(els.metricsInterval.value) || 2000;
+    refreshMetrics();
+    state.metricsTimer = setInterval(refreshMetrics, ms);
+  }
+
+  function panelMaxWidth() {
+    return Math.max(PANEL_MIN, Math.min(PANEL_MAX_CAP, window.innerWidth - 280));
+  }
+
+  function applyPanelWidth(px) {
+    const w = Math.max(PANEL_MIN, Math.min(panelMaxWidth(), Math.round(px)));
+    state.panelWidth = w;
+    document.documentElement.style.setProperty("--panel-width", `${w}px`);
+    return w;
+  }
+
+  function syncToggleButton() {
+    const btn = els.btnPanelToggle;
+    if (!btn) return;
+    if (state.panelOpen) {
+      btn.textContent = "›";
+      btn.title = "Свернуть панель";
+      btn.setAttribute("aria-label", "Свернуть панель");
+      btn.setAttribute("aria-expanded", "true");
+    } else {
+      btn.textContent = "‹";
+      btn.title = "Показать монитор";
+      btn.setAttribute("aria-label", "Показать монитор");
+      btn.setAttribute("aria-expanded", "false");
+    }
+  }
+
+  function setPanelOpen(open) {
+    state.panelOpen = !!open;
+    els.app.classList.toggle("panel-collapsed", !state.panelOpen);
+    syncToggleButton();
+    try {
+      localStorage.setItem(LS_PANEL_OPEN, state.panelOpen ? "1" : "0");
+    } catch (_) {
+      /* ignore */
+    }
+    if (state.panelOpen) {
+      applyPanelWidth(state.panelWidth);
+      startMetricsPoll();
+    } else {
+      stopMetricsPoll();
+    }
+  }
+
+  function initPanelResize() {
+    let dragging = false;
+    let startX = 0;
+    let startW = 0;
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const dx = startX - e.clientX;
+      applyPanelWidth(startW + dx);
+    };
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      els.app.classList.remove("resizing");
+      try {
+        localStorage.setItem(LS_PANEL_WIDTH, String(state.panelWidth));
+      } catch (_) {
+        /* ignore */
+      }
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    els.panelResizer.addEventListener("pointerdown", (e) => {
+      if (!state.panelOpen) return;
+      e.preventDefault();
+      dragging = true;
+      startX = e.clientX;
+      startW = state.panelWidth;
+      els.app.classList.add("resizing");
+      els.panelResizer.setPointerCapture?.(e.pointerId);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    });
+
+    window.addEventListener("resize", () => {
+      if (state.panelOpen) applyPanelWidth(state.panelWidth);
+    });
+  }
+
+  function initSparkResize() {
+    let dragging = false;
+    let sparkId = null;
+    let startY = 0;
+    let startH = 0;
+
+    const historyKey = {
+      "spark-gpu": "gpuUtil",
+      "spark-vram": "gpuMem",
+      "spark-ram": "ram",
+      "spark-cpu": "cpu",
+    };
+    const colorKey = {
+      "spark-gpu": ["--chart-gpu", "#4a9eff"],
+      "spark-vram": ["--chart-vram", "#7ec699"],
+      "spark-ram": ["--chart-ram", "#d4a574"],
+      "spark-cpu": ["--chart-cpu", "#e06c75"],
+    };
+
+    const repaint = (id) => {
+      const hk = historyKey[id];
+      const ck = colorKey[id];
+      if (!hk || !ck) return;
+      paintSpark(id, state.metricsHistory[hk], chartColor(ck[0], ck[1]));
+    };
+
+    const onMove = (e) => {
+      if (!dragging || !sparkId) return;
+      const dy = e.clientY - startY;
+      const h = Math.max(SPARK_H_MIN, Math.min(SPARK_H_MAX, Math.round(startH + dy)));
+      state.chartHeights[sparkId] = h;
+      const wrap = els.monitorPanel.querySelector(`.monitor-spark-wrap[data-spark="${sparkId}"]`);
+      if (wrap) wrap.style.setProperty("--spark-h", `${h}px`);
+      repaint(sparkId);
+    };
+
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      sparkId = null;
+      els.app.classList.remove("spark-resizing");
+      saveChartHeights();
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    els.monitorPanel.addEventListener("pointerdown", (e) => {
+      const handle = e.target.closest(".spark-resizer");
+      if (!handle || !els.monitorPanel.contains(handle)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      sparkId = handle.getAttribute("data-spark");
+      if (!sparkId) return;
+      dragging = true;
+      startY = e.clientY;
+      startH = sparkHeight(sparkId);
+      els.app.classList.add("spark-resizing");
+      handle.setPointerCapture?.(e.pointerId);
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    });
+  }
+
+  function initMonitorPanel() {
+    loadChartHeights();
+    let open = true;
+    let width = PANEL_DEFAULT;
+    let interval = "2000";
+    try {
+      const o = localStorage.getItem(LS_PANEL_OPEN);
+      if (o === "0") open = false;
+      const w = Number(localStorage.getItem(LS_PANEL_WIDTH));
+      if (w >= PANEL_MIN && w <= PANEL_MAX_CAP) width = w;
+      const iv = localStorage.getItem(LS_METRICS_INTERVAL);
+      if (iv && [...els.metricsInterval.options].some((opt) => opt.value === iv)) {
+        interval = iv;
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    applyPanelWidth(width);
+    els.metricsInterval.value = interval;
+    els.btnPanelToggle.addEventListener("click", () => setPanelOpen(!state.panelOpen));
+    els.metricsInterval.addEventListener("change", () => {
+      try {
+        localStorage.setItem(LS_METRICS_INTERVAL, els.metricsInterval.value);
+      } catch (_) {
+        /* ignore */
+      }
+      startMetricsPoll();
+    });
+    initPanelResize();
+    initSparkResize();
+    setPanelOpen(open);
+  }
+
   async function init() {
+    initMonitorPanel();
     await refreshHealth();
     setInterval(refreshHealth, 30000);
     try {

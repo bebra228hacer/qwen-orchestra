@@ -6,6 +6,7 @@
   <title>Qwen Orchestra</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <link rel="stylesheet" href="/static/vendor/highlight-github-dark.min.css" />
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css" />
 </head>
 <body>
   <div class="app">
@@ -47,6 +48,64 @@
         <div class="composer-hint" id="status-line">localhost · оркестр 0.8b → 4b → 9b → 14b · adaptive ctx</div>
       </footer>
     </main>
+
+    <div
+      class="panel-resizer"
+      id="panel-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Изменить ширину монитора"
+      title="Тяните, чтобы изменить ширину"
+    ></div>
+
+    <aside class="monitor-panel" id="monitor-panel" aria-label="Монитор ресурсов">
+      <header class="monitor-header">
+        <button
+          type="button"
+          class="btn btn-ghost btn-icon"
+          id="btn-panel-toggle"
+          title="Свернуть панель"
+          aria-label="Свернуть панель"
+          aria-expanded="true"
+        >›</button>
+        <div class="monitor-title">Монитор</div>
+      </header>
+
+      <div class="monitor-controls">
+        <label class="field-label" for="metrics-interval">Опрос</label>
+        <select id="metrics-interval" class="tier-select" title="Частота обновления метрик">
+          <option value="1000">1 с</option>
+          <option value="2000" selected>2 с</option>
+          <option value="3000">3 с</option>
+          <option value="5000">5 с</option>
+          <option value="10000">10 с</option>
+        </select>
+      </div>
+
+      <div class="monitor-scroll">
+        <section class="monitor-section">
+          <h3 class="monitor-section-title">Нейронка в Ollama</h3>
+          <div id="metrics-ollama" class="monitor-ollama">Загрузка…</div>
+        </section>
+
+        <section class="monitor-section">
+          <h3 class="monitor-section-title">GPU</h3>
+          <div id="metrics-gpu" class="monitor-block">Загрузка…</div>
+        </section>
+
+        <section class="monitor-section">
+          <h3 class="monitor-section-title">Память (RAM)</h3>
+          <div id="metrics-ram" class="monitor-block">Загрузка…</div>
+        </section>
+
+        <section class="monitor-section">
+          <h3 class="monitor-section-title">Процессор</h3>
+          <div id="metrics-cpu" class="monitor-block">Загрузка…</div>
+        </section>
+
+        <div class="monitor-note" id="metrics-note" hidden></div>
+      </div>
+    </aside>
   </div>
 
   <div class="modal-backdrop" id="models-modal" hidden>
@@ -131,6 +190,8 @@
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/purify.min.js"></script>
   <script src="/static/vendor/highlight.min.js"></script>
+  <script src="/static/vendor/katex/katex.min.js"></script>
+  <script src="/static/vendor/katex/auto-render.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
