@@ -33,16 +33,31 @@ from dataclasses import dataclass
 
 from .llm import chat
 
-# Tier — id слота из settings (builtin + пользовательские). Обновляется через settings.apply_to_runtime.
+# Tier — один из 10 фиксированных id (tiny…frontier). Обновляется через settings.apply_to_runtime.
 Tier = str
 # Лестница эскалации по размеру (coder — боковая ветка для кода)
-TIER_ORDER: list[str] = ["tiny", "mid", "heavy", "xlarge"]
+TIER_ORDER: list[str] = [
+    "tiny",
+    "nano",
+    "small",
+    "mid",
+    "large",
+    "heavy",
+    "xlarge",
+    "ultra",
+    "frontier",
+]
 TIER_RANK: dict[str, int] = {
     "tiny": 0,
-    "mid": 1,
-    "heavy": 2,
-    "xlarge": 3,
-    "coder": 3,
+    "nano": 1,
+    "small": 2,
+    "mid": 3,
+    "large": 4,
+    "heavy": 5,
+    "xlarge": 6,
+    "coder": 6,
+    "ultra": 7,
+    "frontier": 8,
 }
 ALL_TIERS: frozenset[str] = frozenset(TIER_RANK)
 ROUTER_AUTO_TIERS: frozenset[str] = frozenset({"tiny", "mid", "heavy"})

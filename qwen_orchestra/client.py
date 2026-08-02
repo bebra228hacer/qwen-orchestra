@@ -139,16 +139,19 @@ class Client:
         label: str | None = None,
         router_prompt: str | None = None,
         slot_id: str | None = None,
-        rank: int = 2,
-        router_auto: bool = True,
+        tier: str | None = None,
+        rank: int | None = None,
+        router_auto: bool | None = None,
         provider: str = "ollama",
     ) -> dict[str, Any]:
+        """Назначить модель на фиксированный тир (`tier` или устаревший `slot_id`)."""
         app_settings.ensure_bootstrapped()
         app_settings.add_slot(
             model=model,
             label=label,
             router_prompt=router_prompt,
             slot_id=slot_id,
+            tier=tier,
             rank=rank,
             router_auto=router_auto,
             provider=provider,

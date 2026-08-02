@@ -1,10 +1,6 @@
 """
-Интерактивный оркестр моделей:
-  tiny   = qwen3.5:0.8b       (валидация + лёгкие ответы)
-  mid    = qwen3.5:4b         (обычные задачи)
-  heavy  = qwen3.5:9b         (сложное)
-  xlarge = qwen2.5:14b        (очень сложное / эскалация)
-  coder  = qwen2.5-coder:14b  (код и отладка)
+Интерактивный оркестр моделей (10 фиксированных тиров):
+  tiny / nano / small / mid / large / heavy / xlarge / coder / ultra / frontier
 
 Запуск: python orchestra_chat.py
 """
@@ -13,10 +9,12 @@ from __future__ import annotations
 
 import sys
 
+from qwen_orchestra import settings as app_settings
 from qwen_orchestra.llm import installed_models
 from qwen_orchestra.orchestra import MODELS, handle, missing_models, missing_optional_models
 from qwen_orchestra.router import ALL_TIERS, TIER_RANK
 
+app_settings.ensure_bootstrapped()
 TIERS = tuple(sorted(ALL_TIERS, key=lambda t: (TIER_RANK.get(t, 99), t)))
 
 

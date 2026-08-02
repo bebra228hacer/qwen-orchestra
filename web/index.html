@@ -45,7 +45,7 @@
           ></textarea>
           <button type="button" class="btn btn-send" id="btn-send" disabled>Send</button>
         </div>
-        <div class="composer-hint" id="status-line">localhost · оркестр 0.8b → 4b → 9b → 14b · adaptive ctx</div>
+        <div class="composer-hint" id="status-line">localhost · оркестр · adaptive ctx</div>
       </footer>
     </main>
 
@@ -133,30 +133,32 @@
         </p>
         <h3>Слоты</h3>
         <ul>
-          <li><strong>Модель</strong> — тег Ollama или id модели OpenRouter.</li>
-          <li><strong>Подпись</strong> — как слот выглядит в селекторе Tier.</li>
-          <li><strong>Промпт</strong> — текст для роутера: <em>когда выбирать этот слот</em>. Пишите конкретно: типы задач, ключевые слова, чего избегать.</li>
-          <li><strong>Участвует в Auto</strong> — роутер может выбрать слот сам. Иначе только вручную или через эскалацию.</li>
+          <li><strong>Тир</strong> — один из 10 фиксированных уровней (tiny…frontier). В чате выбирается тир, не произвольный id.</li>
+          <li><strong>Модель</strong> — тег Ollama или id модели OpenRouter на этом тире.</li>
+          <li><strong>Подпись</strong> — как тир выглядит в селекторе Tier.</li>
+          <li><strong>Промпт</strong> — текст для роутера: <em>когда выбирать этот тир</em>. Пишите конкретно: типы задач, ключевые слова, чего избегать.</li>
+          <li><strong>Участвует в Auto</strong> — роутер может выбрать тир сам. Иначе только вручную или через эскалацию.</li>
         </ul>
         <h3>OpenRouter</h3>
         <p>
-          Можно добавить внешнюю модель (Claude, GPT и т.д.) как обычный слот.
-          Задайте API-ключ (или env <code>OPENROUTER_API_KEY</code>), укажите id
-          вида <code>anthropic/claude-sonnet-4</code>, rank и промпт.
+          Можно назначить внешнюю модель (Claude, GPT и т.д.) на любой тир
+          (часто <code>frontier</code>). Задайте API-ключ (или env <code>OPENROUTER_API_KEY</code>),
+          укажите id вида <code>anthropic/claude-sonnet-4</code>, rank и промпт.
           Роутер и самопроверка остаются локальными; web-tools на OpenRouter пока не работают.
         </p>
         <h3>Rank</h3>
         <p>
-          Число «силы» слота для эскалации после самопроверки (чем больше — тем сильнее).
-          Ориентир по умолчанию: tiny=0, mid=1, heavy=2, xlarge/coder=3, OpenRouter≈4.
-          При провале ответа оркестр поднимается на слот с большим rank.
+          Число «силы» тира для эскалации после самопроверки (чем больше — тем сильнее).
+          Ориентир: tiny=0, nano=1, small=2, mid=3, large=4, heavy=5,
+          xlarge/coder=6, ultra=7, frontier=8.
+          При провале ответа оркестр поднимается на тир с большим rank.
           Одинаковый rank — порядок по id; coder — отдельная ветка для кода.
         </p>
-        <h3>Добавить нейронку</h3>
+        <h3>Назначить модель на тир</h3>
         <p>
-          Ollama: сначала <code>ollama pull …</code>, затем выберите модель.
-          OpenRouter: введите id модели с openrouter.ai. Builtin-слоты
-          (tiny…coder) удалить нельзя — только сменить модель и тексты.
+          Выберите тир в списке, затем модель Ollama или OpenRouter.
+          Так заполняется слот тира (произвольные id вроде <code>dsflash</code> больше не создаются).
+          Все 10 тиров нельзя удалить — только сменить модель и тексты.
         </p>
         <h3>Сохранение</h3>
         <p>
@@ -184,33 +186,36 @@
         </div>
       </div>
       <p class="modal-hint">
-        Для каждой нейронки — когда Auto её выбирает. Builtin-слоты нельзя удалить;
-        можно сменить модель Ollama и текст промпта. Новые слоты — Ollama или OpenRouter ниже.
+        10 фиксированных тиров: назначьте модель (Ollama или OpenRouter) и когда Auto её выбирает.
+        Удалить тир нельзя — только сменить модель, промпт и rank.
       </p>
       <div class="modal-body" id="models-list"></div>
       <div class="add-slot-form" id="add-slot-form">
-        <div class="field-label">Добавить нейронку</div>
+        <div class="field-label">Назначить модель на тир</div>
         <div class="provider-toggle" id="add-provider-toggle" role="group" aria-label="Провайдер">
           <label class="provider-opt"><input type="radio" name="add-provider" value="ollama" checked /> Ollama</label>
           <label class="provider-opt"><input type="radio" name="add-provider" value="openrouter" /> OpenRouter</label>
         </div>
         <div class="add-slot-row">
+          <div class="field-with-label tier-field">
+            <label class="field-label" for="add-slot-tier">Тир</label>
+            <select id="add-slot-tier" class="tier-select" title="К какому тиру относится модель"></select>
+          </div>
           <select id="add-slot-model" class="tier-select" title="Модель из Ollama"></select>
           <input id="add-slot-model-or" class="text-input" type="text" placeholder="anthropic/claude-sonnet-4" title="ID модели OpenRouter" hidden />
-          <input id="add-slot-id" class="text-input" type="text" placeholder="id (необяз.)" maxlength="32" />
           <div class="field-with-label rank-field">
             <label class="field-label" for="add-slot-rank">Rank</label>
             <input id="add-slot-rank" class="text-input rank-input" type="number" value="2" min="0" max="9" title="Сила / порядок эскалации" />
           </div>
         </div>
         <input id="add-slot-label" class="text-input" type="text" placeholder="Подпись в списке" />
-        <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Когда роутеру выбирать эту модель…"></textarea>
+        <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Когда роутеру выбирать этот тир…"></textarea>
         <label class="check-label"><input type="checkbox" id="add-slot-auto" checked /> Участвует в Auto-роутере</label>
       </div>
       <footer class="modal-footer">
         <button type="button" class="btn btn-ghost" id="btn-models-reset">Сбросить по умолчанию</button>
         <div class="modal-footer-right">
-          <button type="button" class="btn btn-primary" id="btn-models-add">Добавить нейронку</button>
+          <button type="button" class="btn btn-primary" id="btn-models-add">Назначить на тир</button>
           <button type="button" class="btn btn-send" id="btn-models-save">Сохранить</button>
         </div>
       </footer>

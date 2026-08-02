@@ -838,6 +838,11 @@ input {
   flex-shrink: 0;
 }
 
+.field-with-label.tier-field {
+  width: 140px;
+  flex-shrink: 0;
+}
+
 .rank-input {
   width: 100%;
 }

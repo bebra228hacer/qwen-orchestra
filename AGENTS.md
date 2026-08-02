@@ -4,7 +4,7 @@
 
 ## Что это
 
-Локальный **оркестр LLM** поверх **Ollama** (Qwen3.5: 0.8b → 4b → 9b + Qwen2.5 14b/coder) + **веб-чат** в стиле Cursor Chat (только тёмная тема, один пользователь, `127.0.0.1`).
+Локальный **оркестр LLM** поверх **Ollama** (10 тиров: tiny→frontier, Qwen3.5/2.5 + optional OpenRouter) + **веб-чат** в стиле Cursor Chat (только тёмная тема, один пользователь, `127.0.0.1`).
 
 Это **не** облачный бот и **не** редактор кода. Веб-UI — чат/composer текста к оркестру.
 
@@ -12,7 +12,7 @@
 
 1. Сервис **Ollama** запущен (`http://localhost:11434`).
 2. Модели: `qwen3.5:0.8b`, `qwen3.5:4b`, `qwen3.5:9b` (`ollama pull …`).
-3. Опционально: `qwen2.5:14b`, `qwen2.5-coder:14b` (тиры `xlarge` / `coder`, Q4_K_M ~9 ГБ).
+3. Опционально: nano/small/large/xlarge/coder/ultra/frontier (`qwen3.5:2b`, `qwen2.5:7b`/`14b`, …).
 4. Опционально: OpenRouter API key (`OPENROUTER_API_KEY` или UI → secrets.json) для внешних слотов.
 5. Python: `pip install -e ".[web]"` или `pip install -r requirements.txt` (`ddgs`, `psutil`; для веба — `fastapi`, `uvicorn`, `pydantic`).
 6. Публичный SDK: `from qwen_orchestra import Client` (in-process; см. `examples/ask_sdk.py`).
@@ -73,10 +73,10 @@ client.set_openrouter_api_key(...)  # secrets.json; None — очистить
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом (не в git).
 Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не при голом импорте модулей.
 
-### OpenRouter-слоты
+### OpenRouter на тирах
 
-- В UI «Модели и промпты»: провайдер OpenRouter + id модели (`anthropic/claude-sonnet-4`) + rank/prompt.
-- Поле слота `provider`: `ollama` (default) | `openrouter`. Builtin всегда ollama.
+- В UI «Модели и промпты»: выберите тир, провайдер OpenRouter + id модели (`anthropic/claude-sonnet-4`) + rank/prompt.
+- Поле слота `provider`: `ollama` (default) | `openrouter` (на любом из 10 тиров).
 - Worker ходит в OpenRouter chat/completions (stream); **tools пока только на Ollama**.
 - Роутер и selfcheck остаются локальными (tiny/mid).
 - Availability: ключ задан → слот доступен; иначе как optional missing (`openrouter:…`).
@@ -90,16 +90,16 @@ user → route → plan context → worker (± web tools) → selfcheck
                  └──── retry на тир выше ───────────────┘  (до MAX_ATTEMPTS)
 ```
 
-- Тиры: `MODELS` из `settings.py` (builtin `tiny`/`mid`/`heavy`/`xlarge`/`coder` + пользовательские слоты; у слота может быть `provider=openrouter`).
-- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); optional — `OPTIONAL_TIERS` (+ OR без ключа).
+- Тиры: ровно **10 фиксированных** id: `tiny` / `nano` / `small` / `mid` / `large` / `heavy` / `xlarge` / `coder` / `ultra` / `frontier`.
+- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); optional — остальные 7 (+ OR без ключа).
 - Промпты роутера («когда использовать») — per-slot `router_prompt`; собираются в `router.SYSTEM`.
-- Эскалация: по `rank` слотов; `coder` → xlarge при retry.
-- UI: «Модели и промпты» — remap Ollama-имён, OpenRouter-слоты + ключ, правка промптов, кнопка «Добавить нейронку».
+- Эскалация: по `rank` тиров; `coder` → ultra/frontier/xlarge при retry.
+- UI: «Модели и промпты» — remap моделей, выпадающий список тира, OpenRouter-ключ, промпты; «Назначить на тир».
 - Публичный вход: `orchestra.handle(user_text, history, force_tier=…, stream=…, verbose=…, on_token=…, on_status=…)`.
 - История в `handle` **без** текущего user-сообщения (сервер так и передаёт; CLI тоже; если хвост дублирует вопрос — он снимается).
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
 - События `on_status`: `route`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`.
-- Эскалация пропускает **неустанавливанные** опциональные тиры (`xlarge`/`coder`); `force_tier` на отсутствующую модель → ошибка.
+- Эскалация пропускает неустановленные optional-тиры; `force_tier` только из десятки, иначе ошибка.
 - `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason` (метаданные — от **выбранной** попытки).
 
 ## Auto-режим: когда какая модель
@@ -212,14 +212,14 @@ Web-tool результаты **кэшируются** между retry (пов�
 | GET/PUT | `/api/settings` | Слоты моделей + `router_model` + промпты роутера (`settings.json`) |
 | PUT | `/api/settings/providers/openrouter` | API-ключ OpenRouter (`secrets.json`; `{api_key}` / `{clear:true}`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
-| POST | `/api/settings/slots` | Добавить нейронку (`provider`: ollama\|openrouter) |
-| DELETE | `/api/settings/slots/{id}` | Удалить пользовательский слот |
+| POST | `/api/settings/slots` | Назначить модель на тир (`tier` + `provider`: ollama\|openrouter) |
+| DELETE | `/api/settings/slots/{id}` | Тиры фиксированы — всегда 400 (смените модель / reset) |
 | GET/POST | `/api/chats` | Список / создать |
 | GET/DELETE | `/api/chats/{id}` | История / удалить (409 если идёт генерация) |
 | POST | `/api/chats/{id}/clear` | Очистить (409 если идёт генерация) |
 | POST | `/api/chats/{id}/messages` | SSE ответ (409 при параллельном POST) |
 
-Тело сообщения: `{ "content": "...", "force_tier": null|"<slot_id>" }`.
+Тело сообщения: `{ "content": "...", "force_tier": null|"tiny"|"nano"|…|"ultra"|"frontier" }` (один из 10).
 
 SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 

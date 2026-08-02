@@ -109,7 +109,7 @@ print(result.text, result.tier, result.model)
 
 - Слева — чаты; Composer; селектор Auto / тиры
 - Markdown + код + LaTeX; чипы tier / ctx / история / selfcheck
-- «Модели и промпты» — слоты Ollama/OpenRouter, промпты роутера
+- «Модели и промпты» — 10 тиров, Ollama/OpenRouter, промпты роутера
 - Правая панель — монитор CPU/RAM/GPU/температуры/Ollama
 - Чаты in-memory (сброс при рестарте сервера)
 

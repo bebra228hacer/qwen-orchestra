@@ -75,9 +75,11 @@ class AddSlotBody(BaseModel):
     model: str
     label: str | None = None
     router_prompt: str | None = None
+    # tier — какой из 10 фиксированных тиров заполнить; id — устаревший алиас
+    tier: str | None = None
     id: str | None = None
-    rank: int = 2
-    router_auto: bool = True
+    rank: int | None = None
+    router_auto: bool | None = None
     provider: str = "ollama"
 
 
@@ -236,6 +238,7 @@ def add_settings_slot(body: AddSlotBody) -> dict[str, Any]:
             label=body.label,
             router_prompt=body.router_prompt,
             slot_id=body.id,
+            tier=body.tier,
             rank=body.rank,
             router_auto=body.router_auto,
             provider=body.provider,

@@ -1,9 +1,13 @@
 """Персистентные настройки оркестра: слоты моделей + промпты роутера.
 
 Файл: settings.json — в корне репозитория при разработке, иначе в user config
-(`%LOCALAPPDATA%/qwen-orchestra` / `~/.config/qwen-orchestra`). Builtin-слоты
-(tiny…coder) нельзя удалить; можно сменить Ollama-модель и текст «когда использовать».
-Пользовательские слоты добавляются из UI / SDK (Ollama или OpenRouter).
+(`%LOCALAPPDATA%/qwen-orchestra` / `~/.config/qwen-orchestra`).
+
+Ровно **10 фиксированных тиров** (id = tier): tiny → nano → small → mid →
+large → heavy → xlarge / coder → ultra → frontier. Удалять нельзя; можно
+сменить модель (Ollama или OpenRouter), подпись, rank и промпт «когда
+использовать». Старые кастомные id (не из десятки) при загрузке мигрируют
+в small/frontier.
 
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом с settings
 (не коммитить).
@@ -159,9 +163,21 @@ DEFAULT_ROUTER_PROMPTS: dict[str, str] = {
         "Приветствия, благодарности, прощания, простая арифметика (2+2), "
         "короткие да/нет. Можно сразу дать короткий ответ в поле reply."
     ),
+    "nano": (
+        "Чуть сложнее tiny: одно короткое уточнение или факт без рассуждений. "
+        "Не выбирай для объяснений и кода — это mid+."
+    ),
+    "small": (
+        "Очень короткие уточнения и простые факты чуть сложнее nano, "
+        "но без развёрнутых объяснений и кода. Обычно не выбирай, если хватает mid."
+    ),
     "mid": (
         "Объяснения, перевод, советы, how-to, «что такое», небольшой код/скрипт, "
         "обычные вопросы по существу. Если нужен интернет (need_web) — минимум этот уровень."
+    ),
+    "large": (
+        "Развёрнутые ответы и средняя сложность между mid и heavy: длиннее how-to, "
+        "несколько связанных вопросов, но ещё не архитектура/доказательства."
     ),
     "heavy": (
         "Сложный анализ, сравнение подходов, архитектура, доказательства, "
@@ -169,14 +185,37 @@ DEFAULT_ROUTER_PROMPTS: dict[str, str] = {
         "Не ставь сюда тяжёлую отладку кода — для этого coder."
     ),
     "xlarge": (
-        "Очень сложные задачи и верх эскалации, когда mid/heavy уже не справились. "
+        "Очень сложные задачи и локальная эскалация, когда mid/heavy уже не справились. "
         "Обычно не выбирай первым — это запасная сила."
     ),
     "coder": (
         "Код и отладка: traceback, стектрейс, ошибки в коде, рефакторинг, "
         "сервис/API/приложение, unit-тесты, JWT и стек, ТЗ с кодом."
     ),
+    "ultra": (
+        "Максимальная локальная сила перед frontier: тяжёлая эскалация после xlarge, "
+        "длинные многочастные задачи. Не выбирай первым."
+    ),
+    "frontier": (
+        "Самые сложные задачи и внешние/топ-модели (часто OpenRouter). "
+        "Не выбирай первым — только когда локальных тиров мало или пользователь явно просит сильнейшую."
+    ),
 }
+
+# Ровно 10 тиров: id слота = force_tier / ответ роутера. Порядок эскалации по rank.
+FIXED_TIER_IDS: tuple[str, ...] = (
+    "tiny",
+    "nano",
+    "small",
+    "mid",
+    "large",
+    "heavy",
+    "xlarge",
+    "coder",
+    "ultra",
+    "frontier",
+)
+FIXED_TIERS = frozenset(FIXED_TIER_IDS)
 
 DEFAULT_SLOTS: list[dict[str, Any]] = [
     {
@@ -189,6 +228,31 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "rank": 0,
         "router_auto": True,
         "builtin": True,
+        "provider": "ollama",
+    },
+    {
+        "id": "nano",
+        "model": "qwen3.5:0.8b",
+        "label": "nano · 3.5 0.8b",
+        "router_prompt": DEFAULT_ROUTER_PROMPTS["nano"],
+        "required": False,
+        "optional": True,
+        "rank": 1,
+        "router_auto": False,
+        "builtin": True,
+        "provider": "ollama",
+    },
+    {
+        "id": "small",
+        "model": "qwen3.5:2b",
+        "label": "small · 3.5 2b",
+        "router_prompt": DEFAULT_ROUTER_PROMPTS["small"],
+        "required": False,
+        "optional": True,
+        "rank": 2,
+        "router_auto": False,
+        "builtin": True,
+        "provider": "ollama",
     },
     {
         "id": "mid",
@@ -197,9 +261,22 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "router_prompt": DEFAULT_ROUTER_PROMPTS["mid"],
         "required": True,
         "optional": False,
-        "rank": 1,
+        "rank": 3,
         "router_auto": True,
         "builtin": True,
+        "provider": "ollama",
+    },
+    {
+        "id": "large",
+        "model": "qwen2.5:7b",
+        "label": "large · 2.5 7b",
+        "router_prompt": DEFAULT_ROUTER_PROMPTS["large"],
+        "required": False,
+        "optional": True,
+        "rank": 4,
+        "router_auto": False,
+        "builtin": True,
+        "provider": "ollama",
     },
     {
         "id": "heavy",
@@ -208,9 +285,10 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "router_prompt": DEFAULT_ROUTER_PROMPTS["heavy"],
         "required": True,
         "optional": False,
-        "rank": 2,
+        "rank": 5,
         "router_auto": True,
         "builtin": True,
+        "provider": "ollama",
     },
     {
         "id": "xlarge",
@@ -219,9 +297,10 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "router_prompt": DEFAULT_ROUTER_PROMPTS["xlarge"],
         "required": False,
         "optional": True,
-        "rank": 3,
+        "rank": 6,
         "router_auto": False,
         "builtin": True,
+        "provider": "ollama",
     },
     {
         "id": "coder",
@@ -230,9 +309,34 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "router_prompt": DEFAULT_ROUTER_PROMPTS["coder"],
         "required": False,
         "optional": True,
-        "rank": 3,
+        "rank": 6,
         "router_auto": False,
         "builtin": True,
+        "provider": "ollama",
+    },
+    {
+        "id": "ultra",
+        "model": "qwen2.5:14b",
+        "label": "ultra · 14b+",
+        "router_prompt": DEFAULT_ROUTER_PROMPTS["ultra"],
+        "required": False,
+        "optional": True,
+        "rank": 7,
+        "router_auto": False,
+        "builtin": True,
+        "provider": "ollama",
+    },
+    {
+        "id": "frontier",
+        "model": "qwen2.5:14b",
+        "label": "frontier · топ / внешний",
+        "router_prompt": DEFAULT_ROUTER_PROMPTS["frontier"],
+        "required": False,
+        "optional": True,
+        "rank": 8,
+        "router_auto": False,
+        "builtin": True,
+        "provider": "ollama",
     },
 ]
 
@@ -243,7 +347,7 @@ ROUTER_SYSTEM_HEADER = """Ты роутер запросов. Отвечай Т�
 Поля:
 - ok: false ТОЛЬКО если запрос пустой, бессмысленный набор символов или спам.
       Непонятный, странный или очень короткий вопрос — это ok=true.
-- tier: один из допустимых id моделей (см. список ниже)
+- tier: один из допустимых id тиров (см. список ниже)
 - need_web: true если нужны свежие данные из интернета
 - reason: коротко почему такой tier
 - reply: если ok=false — вежливый отказ; если tier=tiny — полный короткий ответ; иначе пустая строка
@@ -255,8 +359,8 @@ ROUTER_SYSTEM_FOOTER = """
 Дополнительно:
 - need_web=true => минимум mid (если mid есть в списке)
 - Сомневаешься между двумя тирами — выбирай СТАРШИЙ (больший rank / сильнее).
-- Не выбирай xlarge/coder без явной необходимости, если они есть в списке —
-  обычно их подключает эскалация или явный код/сложность.
+- Не выбирай xlarge/coder/ultra/frontier без явной необходимости —
+  обычно их подключает эскалация, код (coder) или ручной выбор.
 """
 
 
@@ -293,8 +397,7 @@ _settings: AppSettings | None = None
 
 
 def _normalize_provider(raw: Any, *, builtin: bool = False) -> str:
-    if builtin:
-        return "ollama"
+    del builtin  # провайдер можно менять и на фиксированных тирах (Ollama / OpenRouter)
     name = str(raw or "ollama").strip().lower() or "ollama"
     if name not in _PROVIDERS:
         raise ValueError(f"Неизвестный provider: {name!r} (ожидается ollama|openrouter)")
@@ -312,6 +415,10 @@ def _slot_from_dict(raw: dict[str, Any], *, fallback: dict[str, Any] | None = No
     sid = str(base.get("id") or "").strip().lower()
     if not _ID_RE.match(sid):
         raise ValueError(f"Некорректный id слота: {sid!r}")
+    if sid not in FIXED_TIERS:
+        raise ValueError(
+            f"Неизвестный tier: {sid}. Допустимы: {', '.join(FIXED_TIER_IDS)}"
+        )
     model = str(base.get("model") or "").strip()
     if not model:
         raise ValueError(f"Пустое имя модели для слота {sid}")
@@ -319,16 +426,17 @@ def _slot_from_dict(raw: dict[str, Any], *, fallback: dict[str, Any] | None = No
     prompt = str(base.get("router_prompt") or "").strip()
     if not prompt:
         prompt = DEFAULT_ROUTER_PROMPTS.get(sid, "Используй для задач, которые подходят этой модели.")
-    builtin = bool(base.get("builtin", False))
+    default_meta = next((d for d in DEFAULT_SLOTS if d["id"] == sid), {})
+    builtin = True  # все 10 тиров фиксированные
     return ModelSlot(
         id=sid,
         model=model,
         label=label,
         router_prompt=prompt,
-        required=bool(base.get("required", False)),
-        optional=bool(base.get("optional", True)),
-        rank=int(base.get("rank", 1)),
-        router_auto=bool(base.get("router_auto", True)),
+        required=bool(default_meta.get("required", base.get("required", False))),
+        optional=bool(default_meta.get("optional", base.get("optional", True))),
+        rank=int(base.get("rank", default_meta.get("rank", 1))),
+        router_auto=bool(base.get("router_auto", default_meta.get("router_auto", True))),
         builtin=builtin,
         provider=_normalize_provider(base.get("provider"), builtin=builtin),
     )
@@ -341,18 +449,48 @@ def default_settings() -> AppSettings:
     )
 
 
+def _absorb_custom_into_fixed(
+    by_id: dict[str, dict[str, Any]],
+    order: list[str],
+    customs: list[tuple[str, dict[str, Any]]],
+) -> None:
+    """Старые свободные id (dsflash и т.п.) → модель на small/frontier."""
+    used_targets: set[str] = set()
+    for sid, custom in customs:
+        rank = int(custom.get("rank", 2) or 2)
+        targets = ["frontier", "small"] if rank >= 3 else ["small", "frontier"]
+        target = next((t for t in targets if t not in used_targets), targets[0])
+        used_targets.add(target)
+        base = dict(by_id[target])
+        if custom.get("model"):
+            base["model"] = custom["model"]
+        if custom.get("label"):
+            base["label"] = custom["label"]
+        if custom.get("router_prompt"):
+            base["router_prompt"] = custom["router_prompt"]
+        if custom.get("provider") is not None:
+            base["provider"] = custom["provider"]
+        if "router_auto" in custom and custom["router_auto"] is not None:
+            base["router_auto"] = custom["router_auto"]
+        by_id[target] = base
+        if sid in order:
+            order.remove(sid)
+
+
 def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
-    """Builtin-слоты всегда на месте; пользовательские — из файла."""
+    """Всегда ровно 10 фиксированных тиров; кастомные id мигрируют в small/frontier."""
     defaults_by_id = {s["id"]: s for s in DEFAULT_SLOTS}
     raw = raw if isinstance(raw, dict) else {}
     raw_slots = list(raw.get("slots") or [])
     by_id: dict[str, dict[str, Any]] = {}
     order: list[str] = []
+    customs: list[tuple[str, dict[str, Any]]] = []
 
     for d in DEFAULT_SLOTS:
         by_id[d["id"]] = dict(d)
         order.append(d["id"])
 
+    fixed_in_file = 0
     for item in raw_slots:
         if not isinstance(item, dict):
             continue
@@ -360,25 +498,23 @@ def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
         if not sid:
             continue
         if sid in defaults_by_id:
+            fixed_in_file += 1
             merged = dict(defaults_by_id[sid])
-            # Пользователь может менять model/label/prompt/router_auto/rank
-            for key in ("model", "label", "router_prompt", "router_auto", "rank"):
+            for key in ("model", "label", "router_prompt", "router_auto", "rank", "provider"):
                 if key in item and item[key] is not None:
                     merged[key] = item[key]
-            # required/optional/builtin фиксированы для builtin
             by_id[sid] = merged
         else:
-            custom = dict(item)
-            custom["id"] = sid
-            custom["builtin"] = False
-            custom["required"] = False
-            custom.setdefault("optional", True)
-            custom.setdefault("router_auto", True)
-            custom.setdefault("rank", 2)
-            custom.setdefault("provider", "ollama")
-            by_id[sid] = custom
-            if sid not in order:
-                order.append(sid)
+            customs.append((sid, dict(item)))
+
+    if customs:
+        _absorb_custom_into_fixed(by_id, order, customs)
+
+    # При расширении лестницы (7→10 и т.п.) выровнять rank по новой схеме
+    if fixed_in_file < len(FIXED_TIER_IDS):
+        for sid, default in defaults_by_id.items():
+            if sid in by_id:
+                by_id[sid] = {**by_id[sid], "rank": default["rank"]}
 
     slots = [_slot_from_dict(by_id[sid], fallback=defaults_by_id.get(sid)) for sid in order]
     tiny_model = next((s.model for s in slots if s.id == "tiny"), DEFAULT_ROUTER_MODEL)
@@ -531,10 +667,21 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
     return {
         "router_model": s.router_model,
         "slots": [slot.to_dict() for slot in s.slots],
+        "fixed_tiers": [
+            {
+                "id": d["id"],
+                "rank": d["rank"],
+                "label": d["label"],
+                "required": d["required"],
+                "optional": d["optional"],
+            }
+            for d in DEFAULT_SLOTS
+        ],
         "defaults": {
             "router_model": DEFAULT_ROUTER_MODEL,
             "slots": DEFAULT_SLOTS,
             "router_prompts": DEFAULT_ROUTER_PROMPTS,
+            "fixed_tiers": list(FIXED_TIER_IDS),
         },
         "router_system": build_router_system(s),
         "providers": {
@@ -549,50 +696,49 @@ def add_slot(
     label: str | None = None,
     router_prompt: str | None = None,
     slot_id: str | None = None,
-    rank: int = 2,
-    router_auto: bool = True,
+    tier: str | None = None,
+    rank: int | None = None,
+    router_auto: bool | None = None,
     provider: str = "ollama",
 ) -> AppSettings:
+    """Назначить модель на фиксированный тир (id = tier)."""
     s = get_settings()
     model = (model or "").strip()
     if not model:
         raise ValueError("Укажите имя модели")
+    tid = (tier or slot_id or "").strip().lower()
+    if not tid:
+        raise ValueError(
+            f"Укажите tier (один из: {', '.join(FIXED_TIER_IDS)})"
+        )
+    if tid not in FIXED_TIERS:
+        raise ValueError(
+            f"Неизвестный tier: {tid}. Допустимы: {', '.join(FIXED_TIER_IDS)}"
+        )
     prov = _normalize_provider(provider, builtin=False)
-    sid = (slot_id or "").strip().lower()
-    if not sid:
-        sid = re.sub(r"[^a-z0-9]+", "_", model.lower()).strip("_")[:32] or "custom"
-        if sid[0].isdigit():
-            sid = "m_" + sid
-    if not _ID_RE.match(sid):
-        raise ValueError(f"Некорректный id: {sid}")
-    if any(x.id == sid for x in s.slots):
-        raise ValueError(f"Слот {sid} уже есть")
+    slot = next((x for x in s.slots if x.id == tid), None)
+    if slot is None:
+        raise ValueError(f"Тир {tid} отсутствует в настройках")
     if prov == "openrouter":
         prompt_default = (
-            f"Внешняя модель OpenRouter `{model}` — сложные задачи, "
+            f"Внешняя модель OpenRouter `{model}` на тире {tid} — сложные задачи, "
             f"когда локальных не хватает (опиши критерии точнее в настройках)."
         )
     else:
         prompt_default = (
-            f"Используй модель {model} для задач, которые ей лучше подходят "
+            f"Используй модель {model} (тир {tid}) для задач, которые ей лучше подходят "
             f"(опиши критерии точнее в настройках)."
         )
-    prompt = (router_prompt or "").strip() or prompt_default
+    prompt = (router_prompt or "").strip() or slot.router_prompt or prompt_default
     label_default = model if prov == "ollama" else f"{model} · OR"
-    s.slots.append(
-        ModelSlot(
-            id=sid,
-            model=model,
-            label=(label or label_default).strip() or label_default,
-            router_prompt=prompt,
-            required=False,
-            optional=True,
-            rank=int(rank),
-            router_auto=bool(router_auto),
-            builtin=False,
-            provider=prov,
-        )
-    )
+    slot.model = model
+    slot.provider = prov
+    slot.label = (label or "").strip() or label_default
+    slot.router_prompt = prompt
+    if rank is not None:
+        slot.rank = int(rank)
+    if router_auto is not None:
+        slot.router_auto = bool(router_auto)
     return save_settings(s)
 
 
@@ -604,6 +750,14 @@ def update_settings(
     """Полная замена списка слотов (+ опционально модель роутера)."""
     if not isinstance(slots_payload, list) or not slots_payload:
         raise ValueError("Нужен непустой список slots")
+    for item in slots_payload:
+        if not isinstance(item, dict):
+            raise ValueError("Каждый slot должен быть объектом")
+        sid = str(item.get("id") or "").strip().lower()
+        if sid and sid not in FIXED_TIERS:
+            raise ValueError(
+                f"Неизвестный tier: {sid}. Допустимы: {', '.join(FIXED_TIER_IDS)}"
+            )
     current = get_settings()
     rm = _normalize_router_model(
         router_model if router_model is not None else current.router_model,
@@ -618,15 +772,13 @@ def update_settings(
 
 
 def delete_slot(slot_id: str) -> AppSettings:
-    s = get_settings()
     sid = slot_id.strip().lower()
-    slot = next((x for x in s.slots if x.id == sid), None)
-    if slot is None:
-        raise KeyError(slot_id)
-    if slot.builtin or slot.required:
-        raise ValueError(f"Слот {sid} встроенный — его нельзя удалить")
-    s.slots = [x for x in s.slots if x.id != sid]
-    return save_settings(s)
+    if sid in FIXED_TIERS:
+        raise ValueError(
+            f"Тир {sid} фиксированный — удалить нельзя. "
+            "Смените модель или сбросьте настройки."
+        )
+    raise KeyError(slot_id)
 
 
 def apply_to_runtime(settings: AppSettings | None = None) -> None:

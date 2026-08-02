@@ -1,4 +1,4 @@
-"""Оркестр: tiny (3.5 0.8b) → mid (3.5 4b) → heavy (3.5 9b) → xlarge (14b) + coder.
+"""Оркестр: tiny → nano → small → mid → large → heavy → xlarge/coder → ultra → frontier.
 
 Цикл одного запроса:
     route → plan_worker_context → worker → selfcheck → (retry на старшем тире)
@@ -27,18 +27,31 @@ from .tools_web import TOOL_IMPL, TOOLS
 
 MODELS: dict[str, str] = {
     "tiny": "qwen3.5:0.8b",
+    "nano": "qwen3.5:0.8b",
+    "small": "qwen3.5:2b",
     "mid": "qwen3.5:4b",
+    "large": "qwen2.5:7b",
     "heavy": "qwen3.5:9b",
     "xlarge": "qwen2.5:14b",
     "coder": "qwen2.5-coder:14b",
+    "ultra": "qwen2.5:14b",
+    "frontier": "qwen2.5:14b",
 }
 
 # id слота → ollama | openrouter (синхронизируется apply_to_runtime)
 PROVIDERS: dict[str, str] = {tid: "ollama" for tid in MODELS}
 
-# Без этих моделей оркестр не стартует; 14b — опционально
+# Без этих моделей оркестр не стартует; остальные — опционально
 REQUIRED_TIERS: tuple[str, ...] = ("tiny", "mid", "heavy")
-OPTIONAL_TIERS: tuple[str, ...] = ("xlarge", "coder")
+OPTIONAL_TIERS: tuple[str, ...] = (
+    "nano",
+    "small",
+    "large",
+    "xlarge",
+    "coder",
+    "ultra",
+    "frontier",
+)
 
 MAX_TOOL_ROUNDS = 4
 MAX_TOOL_CALLS = 8
@@ -51,7 +64,9 @@ SELFCHECK_LLM = True
 SELFCHECK_MODEL = MODELS["mid"]
 
 # num_ctx = ceil_256(prompt + template + reserve_ответа + safety), clamp [MIN…MAX]
-_COMPLEX_TIERS: frozenset[str] = frozenset({"heavy", "xlarge", "coder"})
+_COMPLEX_TIERS: frozenset[str] = frozenset(
+    {"heavy", "xlarge", "coder", "ultra", "frontier"}
+)
 NUM_CTX_MIN = 256
 NUM_CTX_MAX = 8192
 NUM_CTX_FULL = NUM_CTX_MAX
@@ -236,7 +251,7 @@ def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
         return None if nxt == tier else nxt
 
     if tier == "coder":
-        for cand in ("xlarge", "heavy", "mid"):
+        for cand in ("ultra", "frontier", "xlarge", "heavy", "mid"):
             if cand in available and cand != tier:
                 return cand
         return None

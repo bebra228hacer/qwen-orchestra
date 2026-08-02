@@ -8,17 +8,17 @@
 
 ## Возможности
 
-- **Авто-роутинг** по слотам: tiny → mid → heavy → xlarge (+ coder для тяжёлого кода). Ручной выбор тира в UI/CLI.
+- **Авто-роутинг** по 10 фиксированным тирам: tiny → nano → small → mid → large → heavy → xlarge / coder → ultra → frontier. Ручной выбор тира в UI/CLI.
 - **Детерминированный floor/ceiling** — tiny не «занижает» сложность; «кратко» держит потолок mid.
 - **Самопроверка ответа** (правила + LLM-ревью) и **retry с эскалацией** до нескольких попыток.
 - **Адаптивный `num_ctx`** — минимальное окно под запрос, история для тяжёлых тиров только по отсылкам.
 - **Web-tools** — поиск и чтение URL (кэш между retry, лимиты вызовов).
 - **Веб-UI** — чаты, Markdown/код/формулы, чипы статуса, «Модели и промпты», монитор CPU/RAM/GPU/Ollama.
-- **OpenRouter-слоты** — внешние модели рядом с локальными (ключ в env / `secrets.json`); tools пока только на Ollama.
+- **OpenRouter** — внешняя модель на любом тире (часто `frontier`; ключ в env / `secrets.json`); tools пока только на Ollama.
 - **Python SDK** — `from qwen_orchestra import Client` (ask / route / health / settings in-process).
 - **CLI** — интерактивный оркестр и one-shot; лаунчер с автозапуском Ollama при необходимости.
 
-Defaults: `qwen3.5:0.8b` · `4b` · `9b` · `qwen2.5:14b` · `qwen2.5-coder:14b` (14b опциональны).
+Defaults: `0.8b` · `nano` · `2b` · `4b` · `7b` · `9b` · `14b` · `coder` · `ultra` · `frontier` (optional кроме tiny/mid/heavy).
 
 ```
 user → route → plan context → worker (± web) → selfcheck

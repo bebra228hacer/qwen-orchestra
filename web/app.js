@@ -23,9 +23,9 @@
     btnModelsSave: $("#btn-models-save"),
     btnModelsAdd: $("#btn-models-add"),
     btnModelsReset: $("#btn-models-reset"),
+    addSlotTier: $("#add-slot-tier"),
     addSlotModel: $("#add-slot-model"),
     addSlotModelOr: $("#add-slot-model-or"),
-    addSlotId: $("#add-slot-id"),
     addSlotRank: $("#add-slot-rank"),
     addSlotLabel: $("#add-slot-label"),
     addSlotPrompt: $("#add-slot-prompt"),
@@ -65,6 +65,7 @@
     selectGen: 0,
     ollamaModels: [],
     slots: [],
+    fixedTiers: [],
     routerModel: "",
     panelOpen: true,
     panelWidth: PANEL_DEFAULT,
@@ -385,7 +386,10 @@
     auto.value = "auto";
     auto.textContent = "Auto";
     els.tierSelect.appendChild(auto);
-    for (const s of slots || []) {
+    const list = [...(slots || [])].sort(
+      (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
+    );
+    for (const s of list) {
       const opt = document.createElement("option");
       opt.value = s.id;
       opt.textContent = s.label || `${s.id} · ${s.model}`;
@@ -393,6 +397,71 @@
     }
     const ok = [...els.tierSelect.options].some((o) => o.value === prev);
     els.tierSelect.value = ok ? prev : "auto";
+  }
+
+  function fillTierSelect(selectEl, selected) {
+    if (!selectEl) return;
+    const prev = selected || selectEl.value || "";
+    selectEl.innerHTML = "";
+    const src =
+      state.fixedTiers.length > 0
+        ? state.fixedTiers
+        : (state.slots || []).map((s) => ({
+            id: s.id,
+            label: s.label || s.id,
+            rank: s.rank,
+          }));
+    const list = [...src].sort(
+      (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
+    );
+    for (const t of list) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.id + (t.label && !String(t.label).startsWith(t.id) ? ` · ${t.label}` : "");
+      if (t.label && String(t.label).startsWith(t.id)) opt.textContent = t.label;
+      selectEl.appendChild(opt);
+    }
+    if (prev && [...selectEl.options].some((o) => o.value === prev)) {
+      selectEl.value = prev;
+    } else if (list.some((t) => t.id === "frontier")) {
+      selectEl.value = "frontier";
+    } else if (list.length) {
+      selectEl.value = list[list.length - 1].id;
+    }
+  }
+
+  /** Короткий тег модели для статус-строки: 0.8b, 4b, claude-sonnet-4… */
+  function shortModelTag(model) {
+    const raw = String(model || "").trim();
+    if (!raw) return "?";
+    const size = raw.match(/(\d+(?:\.\d+)?)\s*([bBmM])\b/);
+    if (size) return `${size[1]}${size[2].toLowerCase()}`;
+    const base = raw.includes("/") ? raw.split("/").pop() : raw;
+    return (base || raw).slice(0, 28);
+  }
+
+  /** Цепочка слотов по rank (эскалация), без подряд одинаковых тегов. */
+  function orchestraChainText(slots) {
+    const list = [...(slots || [])].sort(
+      (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
+    );
+    const tags = [];
+    for (const s of list) {
+      const tag = shortModelTag(s.model);
+      if (tags.length && tags[tags.length - 1] === tag) continue;
+      tags.push(tag);
+    }
+    return tags.length ? tags.join(" → ") : "—";
+  }
+
+  function idleStatusLine(slots) {
+    const src = slots || state.slots;
+    return `localhost · оркестр ${orchestraChainText(src)} · adaptive ctx`;
+  }
+
+  function setIdleStatusLine(slots) {
+    if (slots) state.slots = (slots || []).map((s) => ({ ...s }));
+    if (!state.busy) els.statusLine.textContent = idleStatusLine(state.slots);
   }
 
   function fillModelSelect(selectEl, selected) {
@@ -436,12 +505,45 @@
     const isOr = prov === "openrouter";
     els.addSlotModel.hidden = isOr;
     els.addSlotModelOr.hidden = !isOr;
-    if (isOr && Number(els.addSlotRank.value) === 2) {
-      els.addSlotRank.value = "4";
+    if (isOr) {
+      if (els.addSlotTier && els.addSlotTier.querySelector('option[value="frontier"]')) {
+        els.addSlotTier.value = "frontier";
+      }
+      const slot = (state.slots || []).find((s) => s.id === (els.addSlotTier && els.addSlotTier.value));
+      if (slot && Number.isFinite(Number(slot.rank))) {
+        els.addSlotRank.value = String(slot.rank);
+      } else if (Number(els.addSlotRank.value) < 4) {
+        els.addSlotRank.value = "5";
+      }
     }
-    if (!isOr && Number(els.addSlotRank.value) === 4) {
-      els.addSlotRank.value = "2";
+  }
+
+  function syncCardProviderUi(card) {
+    const provSel = card.querySelector(".slot-provider");
+    const prov = (provSel && provSel.value) || card.dataset.provider || "ollama";
+    card.dataset.provider = prov;
+    const wrap = card.querySelector(".slot-model-wrap");
+    if (!wrap) return;
+    const current =
+      (card.querySelector(".slot-model") && card.querySelector(".slot-model").value) || "";
+    wrap.innerHTML = "";
+    const modelLab = document.createElement("label");
+    modelLab.className = "field-label";
+    modelLab.textContent = prov === "openrouter" ? "Модель OpenRouter" : "Модель";
+    let modelCtrl;
+    if (prov === "openrouter") {
+      modelCtrl = document.createElement("input");
+      modelCtrl.className = "text-input slot-model";
+      modelCtrl.type = "text";
+      modelCtrl.value = current;
+      modelCtrl.placeholder = "provider/model-id";
+    } else {
+      modelCtrl = document.createElement("select");
+      modelCtrl.className = "tier-select slot-model";
+      fillModelSelect(modelCtrl, current);
     }
+    wrap.appendChild(modelLab);
+    wrap.appendChild(modelCtrl);
   }
 
   function renderOpenRouterStatus(providers) {
@@ -506,6 +608,8 @@
 
   function renderModelsList(slots) {
     state.slots = (slots || []).map((s) => ({ ...s }));
+    setIdleStatusLine(state.slots);
+    fillTierSelect(els.addSlotTier, els.addSlotTier && els.addSlotTier.value);
     els.modelsList.innerHTML = "";
     for (const slot of state.slots) {
       const card = document.createElement("div");
@@ -518,32 +622,34 @@
       const idWrap = document.createElement("div");
       idWrap.style.display = "flex";
       idWrap.style.alignItems = "center";
+      idWrap.style.gap = "8px";
       const idEl = document.createElement("span");
       idEl.className = "slot-id";
-      idEl.textContent = slot.id + (slot.builtin ? " · builtin" : "");
+      idEl.textContent = "тир · " + slot.id;
       idWrap.appendChild(idEl);
-      if ((slot.provider || "ollama") === "openrouter") {
-        const badge = document.createElement("span");
-        badge.className = "slot-provider-badge or";
-        badge.textContent = "OpenRouter";
-        idWrap.appendChild(badge);
+      const provSel = document.createElement("select");
+      provSel.className = "tier-select slot-provider";
+      provSel.title = "Провайдер модели";
+      for (const [val, lab] of [
+        ["ollama", "Ollama"],
+        ["openrouter", "OpenRouter"],
+      ]) {
+        const o = document.createElement("option");
+        o.value = val;
+        o.textContent = lab;
+        provSel.appendChild(o);
       }
+      provSel.value = slot.provider === "openrouter" ? "openrouter" : "ollama";
+      provSel.addEventListener("change", () => syncCardProviderUi(card));
+      idWrap.appendChild(provSel);
       head.appendChild(idWrap);
-      if (!slot.builtin && !slot.required) {
-        const del = document.createElement("button");
-        del.type = "button";
-        del.className = "btn btn-ghost danger";
-        del.textContent = "Удалить";
-        del.addEventListener("click", () => removeSlot(slot.id));
-        head.appendChild(del);
-      }
       card.appendChild(head);
 
       const meta = document.createElement("div");
       meta.className = "slot-meta";
 
       const modelWrap = document.createElement("div");
-      modelWrap.className = "field-with-label";
+      modelWrap.className = "field-with-label slot-model-wrap";
       const modelLab = document.createElement("label");
       modelLab.className = "field-label";
       modelLab.textContent =
@@ -593,7 +699,7 @@
       promptInp.className = "prompt-input slot-prompt";
       promptInp.rows = 3;
       promptInp.value = slot.router_prompt || "";
-      promptInp.placeholder = "Когда роутеру выбирать эту модель…";
+      promptInp.placeholder = "Когда роутеру выбирать этот тир…";
       card.appendChild(promptInp);
 
       const autoLab = document.createElement("label");
@@ -616,6 +722,9 @@
       const id = card.dataset.id;
       const prev = state.slots.find((s) => s.id === id) || {};
       const modelEl = card.querySelector(".slot-model");
+      const provEl = card.querySelector(".slot-provider");
+      const provider =
+        (provEl && provEl.value) || card.dataset.provider || prev.provider || "ollama";
       out.push({
         id,
         model: (modelEl && modelEl.value) || "",
@@ -625,8 +734,8 @@
         router_auto: card.querySelector(".slot-auto").checked,
         required: !!prev.required,
         optional: prev.optional !== false,
-        builtin: !!prev.builtin,
-        provider: card.dataset.provider || prev.provider || "ollama",
+        builtin: true,
+        provider,
       });
     }
     return out;
@@ -635,10 +744,12 @@
   async function loadSettings() {
     const data = await api("/api/settings");
     state.routerModel = data.router_model || "";
+    state.fixedTiers = data.fixed_tiers || [];
     renderModelsList(data.slots || []);
     populateTierSelect(data.slots || []);
     fillModelSelect(els.addSlotModel, els.addSlotModel.value || "");
     fillModelSelect(els.routerModelSelect, state.routerModel);
+    fillTierSelect(els.addSlotTier, els.addSlotTier && els.addSlotTier.value);
     renderOpenRouterStatus(data.providers);
     syncAddProviderUi();
     return data;
@@ -680,6 +791,7 @@
         }),
       });
       state.routerModel = data.router_model || "";
+      state.fixedTiers = data.fixed_tiers || state.fixedTiers;
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
       fillModelSelect(els.routerModelSelect, state.routerModel);
@@ -704,10 +816,15 @@
 
   async function addModelSlot() {
     const provider = selectedAddProvider();
+    const tier = (els.addSlotTier && els.addSlotTier.value) || "";
     const model =
       provider === "openrouter"
         ? els.addSlotModelOr.value.trim()
         : els.addSlotModel.value.trim();
+    if (!tier) {
+      setModelsStatus("Выберите тир", "err");
+      return;
+    }
     if (!model) {
       setModelsStatus(
         provider === "openrouter"
@@ -717,20 +834,18 @@
       );
       return;
     }
-    setModelsStatus("Добавление…");
+    setModelsStatus("Назначение…");
     try {
       await persistDraftSlots();
       const body = {
         model,
         provider,
+        tier,
         label: els.addSlotLabel.value.trim() || null,
         router_prompt: els.addSlotPrompt.value.trim() || null,
-        id: els.addSlotId.value.trim() || null,
         rank: Number.isFinite(Number(els.addSlotRank.value))
           ? Number(els.addSlotRank.value)
-          : provider === "openrouter"
-            ? 4
-            : 2,
+          : null,
         router_auto: els.addSlotAuto.checked,
       };
       const data = await api("/api/settings/slots", {
@@ -738,34 +853,16 @@
         body: JSON.stringify(body),
       });
       state.routerModel = data.router_model || state.routerModel;
+      state.fixedTiers = data.fixed_tiers || state.fixedTiers;
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
       fillModelSelect(els.routerModelSelect, state.routerModel);
       renderOpenRouterStatus(data.providers);
-      els.addSlotId.value = "";
       els.addSlotLabel.value = "";
       els.addSlotPrompt.value = "";
       els.addSlotModelOr.value = "";
-      els.addSlotRank.value = provider === "openrouter" ? "4" : "2";
-      els.addSlotAuto.checked = true;
-      setModelsStatus("Добавлено", "ok");
+      setModelsStatus(`Модель назначена на тир «${tier}»`, "ok");
       await refreshHealth();
-    } catch (e) {
-      setModelsStatus(e.message, "err");
-    }
-  }
-
-  async function removeSlot(id) {
-    if (!confirm(`Удалить слот «${id}»?`)) return;
-    setModelsStatus("Удаление…");
-    try {
-      await persistDraftSlots();
-      const data = await api(`/api/settings/slots/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-      });
-      renderModelsList(data.slots || []);
-      populateTierSelect(data.slots || []);
-      setModelsStatus("Удалено", "ok");
     } catch (e) {
       setModelsStatus(e.message, "err");
     }
@@ -777,6 +874,7 @@
     try {
       const data = await api("/api/settings/reset", { method: "POST", body: "{}" });
       state.routerModel = data.router_model || "";
+      state.fixedTiers = data.fixed_tiers || [];
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
       fillModelSelect(els.routerModelSelect, state.routerModel);
@@ -793,14 +891,15 @@
       state.ollamaModels = h.models || [];
       if (h.slots) {
         populateTierSelect(h.slots);
+        setIdleStatusLine(h.slots);
       } else if (h.tiers) {
-        populateTierSelect(
-          Object.entries(h.tiers).map(([id, model]) => ({
-            id,
-            model,
-            label: `${id} · ${model}`,
-          }))
-        );
+        const fromTiers = Object.entries(h.tiers).map(([id, model]) => ({
+          id,
+          model,
+          label: `${id} · ${model}`,
+        }));
+        populateTierSelect(fromTiers);
+        setIdleStatusLine(fromTiers);
       }
       if (!h.ollama) {
         els.health.className = "health err";
@@ -1263,6 +1362,15 @@
   document.querySelectorAll('input[name="add-provider"]').forEach((el) => {
     el.addEventListener("change", syncAddProviderUi);
   });
+  if (els.addSlotTier) {
+    els.addSlotTier.addEventListener("change", () => {
+      const slot = (state.slots || []).find((s) => s.id === els.addSlotTier.value);
+      if (slot && Number.isFinite(Number(slot.rank))) {
+        els.addSlotRank.value = String(slot.rank);
+      }
+      if (slot && slot.label) els.addSlotLabel.placeholder = slot.label;
+    });
+  }
   els.messages.addEventListener("click", (e) => {
     const btn = e.target.closest(".code-copy");
     if (!btn || !els.messages.contains(btn)) return;
