@@ -27,9 +27,7 @@
     addSlotModel: $("#add-slot-model"),
     addSlotModelOr: $("#add-slot-model-or"),
     addSlotRank: $("#add-slot-rank"),
-    addSlotLabel: $("#add-slot-label"),
     addSlotPrompt: $("#add-slot-prompt"),
-    addSlotAuto: $("#add-slot-auto"),
     orApiKey: $("#or-api-key"),
     orKeyStatus: $("#or-key-status"),
     btnOrKeySave: $("#btn-or-key-save"),
@@ -64,7 +62,7 @@
     busy: false,
     selectGen: 0,
     ollamaModels: [],
-    slots: [],
+    slots: [], // пул моделей (compat имя)
     fixedTiers: [],
     routerModel: "",
     panelOpen: true,
@@ -89,9 +87,11 @@
     },
   };
 
-  function forceTier() {
+  /** Выбор в чате: Auto | force_model=<pool id> */
+  function forceSelection() {
     const v = els.tierSelect.value;
-    return v === "auto" ? null : v;
+    if (!v || v === "auto") return { force_model: null, force_tier: null };
+    return { force_model: v, force_tier: null };
   }
 
   function escapeHtml(s) {
@@ -367,7 +367,12 @@
       let msg = res.statusText;
       try {
         const j = await res.json();
-        msg = j.detail || JSON.stringify(j);
+        const d = j.detail;
+        if (typeof d === "string") msg = d;
+        else if (Array.isArray(d))
+          msg = d.map((x) => x.msg || JSON.stringify(x)).join("; ");
+        else if (d != null) msg = JSON.stringify(d);
+        else if (j.message) msg = j.message;
       } catch (_) {
         /* ignore */
       }
@@ -379,20 +384,25 @@
     return res;
   }
 
-  function populateTierSelect(slots) {
+  function populateTierSelect(pool) {
     const prev = els.tierSelect.value || "auto";
     els.tierSelect.innerHTML = "";
     const auto = document.createElement("option");
     auto.value = "auto";
     auto.textContent = "Auto";
     els.tierSelect.appendChild(auto);
-    const list = [...(slots || [])].sort(
-      (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
-    );
-    for (const s of list) {
+    const list = [...(pool || [])].sort((a, b) => {
+      const ra = a.tier ? Number(a.rank ?? 0) : 999;
+      const rb = b.tier ? Number(b.rank ?? 0) : 999;
+      return ra - rb || String(a.label || a.model).localeCompare(String(b.label || b.model));
+    });
+    for (const m of list) {
+      if (!(m.model || "").trim()) continue;
       const opt = document.createElement("option");
-      opt.value = s.id;
-      opt.textContent = s.label || `${s.id} · ${s.model}`;
+      opt.value = m.id;
+      const tierBit = m.tier ? `${m.tier}·r${m.rank ?? "?"}` : "вручную";
+      const prov = m.provider === "openrouter" ? "OR" : "Ollama";
+      opt.textContent = `${m.model || m.id} · ${prov} (${tierBit})`;
       els.tierSelect.appendChild(opt);
     }
     const ok = [...els.tierSelect.options].some((o) => o.value === prev);
@@ -401,31 +411,40 @@
 
   function fillTierSelect(selectEl, selected) {
     if (!selectEl) return;
-    const prev = selected || selectEl.value || "";
+    const prev = selected !== undefined && selected !== null ? selected : selectEl.value || "";
     selectEl.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "не участвует в роутинге";
+    selectEl.appendChild(none);
     const src =
       state.fixedTiers.length > 0
         ? state.fixedTiers
-        : (state.slots || []).map((s) => ({
-            id: s.id,
-            label: s.label || s.id,
-            rank: s.rank,
-          }));
+        : [
+            "tiny",
+            "nano",
+            "small",
+            "mid",
+            "large",
+            "heavy",
+            "xlarge",
+            "coder",
+            "ultra",
+            "frontier",
+          ].map((id, i) => ({ id, rank: i, label: id }));
     const list = [...src].sort(
       (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
     );
     for (const t of list) {
       const opt = document.createElement("option");
       opt.value = t.id;
-      opt.textContent = t.label || t.id;
+      opt.textContent = t.id;
       selectEl.appendChild(opt);
     }
-    if (prev && [...selectEl.options].some((o) => o.value === prev)) {
+    if (prev === "" || prev === null) {
+      selectEl.value = "";
+    } else if (prev && [...selectEl.options].some((o) => o.value === prev)) {
       selectEl.value = prev;
-    } else if (list.some((t) => t.id === "frontier")) {
-      selectEl.value = "frontier";
-    } else if (list.length) {
-      selectEl.value = list[list.length - 1].id;
     }
   }
 
@@ -441,9 +460,11 @@
 
   /** Цепочка слотов по rank: id, если размер модели дублируется. */
   function orchestraChainText(slots) {
-    const list = [...(slots || [])].sort(
-      (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
-    );
+    const list = [...(slots || [])]
+      .filter((s) => (s.model || "").trim())
+      .sort(
+        (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
+      );
     const tags = [];
     const seenSizes = new Set();
     for (const s of list) {
@@ -467,14 +488,21 @@
     if (!state.busy) els.statusLine.textContent = idleStatusLine(state.slots);
   }
 
-  function fillModelSelect(selectEl, selected) {
+  function fillModelSelect(selectEl, selected, opts) {
+    const allowEmpty = !!(opts && opts.allowEmpty);
     selectEl.innerHTML = "";
+    if (allowEmpty) {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "— не назначена —";
+      selectEl.appendChild(empty);
+    }
     const models = state.ollamaModels.length
       ? state.ollamaModels
       : selected
         ? [selected]
         : [];
-    if (!models.length) {
+    if (!models.length && !allowEmpty) {
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "Нет моделей Ollama";
@@ -495,6 +523,8 @@
       opt.textContent = selected + " (не установлена)";
       selectEl.appendChild(opt);
       selectEl.value = selected;
+    } else if (allowEmpty) {
+      selectEl.value = "";
     }
   }
 
@@ -508,16 +538,11 @@
     const isOr = prov === "openrouter";
     els.addSlotModel.hidden = isOr;
     els.addSlotModelOr.hidden = !isOr;
-    if (isOr) {
-      if (els.addSlotTier && els.addSlotTier.querySelector('option[value="frontier"]')) {
-        els.addSlotTier.value = "frontier";
-      }
-      const slot = (state.slots || []).find((s) => s.id === (els.addSlotTier && els.addSlotTier.value));
-      if (slot && Number.isFinite(Number(slot.rank))) {
-        els.addSlotRank.value = String(slot.rank);
-      } else if (Number(els.addSlotRank.value) < 4) {
-        els.addSlotRank.value = "5";
-      }
+    if (isOr && Number(els.addSlotRank.value) < 4 && els.addSlotTier && els.addSlotTier.value) {
+      els.addSlotRank.value = "5";
+    }
+    if (els.addSlotRank && els.addSlotTier) {
+      els.addSlotRank.disabled = !(els.addSlotTier.value || "").trim();
     }
   }
 
@@ -539,11 +564,11 @@
       modelCtrl.className = "text-input slot-model";
       modelCtrl.type = "text";
       modelCtrl.value = current;
-      modelCtrl.placeholder = "provider/model-id";
+      modelCtrl.placeholder = "provider/model-id или пусто";
     } else {
       modelCtrl = document.createElement("select");
       modelCtrl.className = "tier-select slot-model";
-      fillModelSelect(modelCtrl, current);
+      fillModelSelect(modelCtrl, current, { allowEmpty: true });
     }
     wrap.appendChild(modelLab);
     wrap.appendChild(modelCtrl);
@@ -612,16 +637,30 @@
   function defaultRankFor(tierId) {
     const t = (state.fixedTiers || []).find((x) => x.id === tierId);
     if (t && t.rank != null) return Number(t.rank);
-    const s = (state.slots || []).find((x) => x.id === tierId);
-    return s && s.rank != null ? Number(s.rank) : 0;
+    return 0;
   }
 
   function fillCardTierSelect(selectEl, selected) {
     selectEl.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "не участвует в роутинге";
+    selectEl.appendChild(none);
     const src =
       state.fixedTiers.length > 0
         ? state.fixedTiers
-        : (state.slots || []).map((s) => ({ id: s.id, rank: s.rank }));
+        : [
+            "tiny",
+            "nano",
+            "small",
+            "mid",
+            "large",
+            "heavy",
+            "xlarge",
+            "coder",
+            "ultra",
+            "frontier",
+          ].map((id, i) => ({ id, rank: i }));
     const list = [...src].sort(
       (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
     );
@@ -631,93 +670,68 @@
       opt.textContent = t.id;
       selectEl.appendChild(opt);
     }
-    if (selected && [...selectEl.options].some((o) => o.value === selected)) {
-      selectEl.value = selected;
+    if (selected) selectEl.value = selected;
+    else selectEl.value = "";
+  }
+
+  function syncCardTierRank(card) {
+    const tierSel = card.querySelector(".slot-tier");
+    const rankInp = card.querySelector(".slot-rank");
+    if (!tierSel || !rankInp) return;
+    const hasTier = !!(tierSel.value || "").trim();
+    rankInp.disabled = !hasTier;
+    if (!hasTier) {
+      rankInp.value = "";
+      rankInp.placeholder = "—";
+    } else if (rankInp.value === "" || rankInp.value == null) {
+      rankInp.value = String(defaultRankFor(tierSel.value));
     }
   }
 
-  function ensureCardDeleteBtn(card) {
-    const head = card.querySelector(".slot-card-head");
-    if (!head || head.querySelector(".btn-slot-delete")) return;
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "btn btn-ghost danger btn-slot-delete";
-    del.textContent = "Удалить";
-    del.title = "Сбросить тир к модели по умолчанию";
-    del.addEventListener("click", () => removeSlot(card.dataset.id));
-    head.appendChild(del);
-  }
-
-  function swapCardTiers(cardA, cardB) {
-    const idA = cardA.dataset.id;
-    const idB = cardB.dataset.id;
-    cardA.dataset.id = idB;
-    cardB.dataset.id = idA;
-    const tierA = cardA.querySelector(".slot-tier");
-    const tierB = cardB.querySelector(".slot-tier");
-    if (tierA) tierA.value = idB;
-    if (tierB) tierB.value = idA;
-    const rankA = cardA.querySelector(".slot-rank");
-    const rankB = cardB.querySelector(".slot-rank");
-    if (rankA) rankA.value = String(defaultRankFor(idB));
-    if (rankB) rankB.value = String(defaultRankFor(idA));
-  }
-
-  function onCardTierChange(card, newTier) {
-    const oldTier = card.dataset.id;
-    if (!newTier || newTier === oldTier) {
-      const sel = card.querySelector(".slot-tier");
-      if (sel) sel.value = oldTier;
-      return;
-    }
-    const other = [...els.modelsList.querySelectorAll(".slot-card")].find(
-      (c) => c !== card && c.dataset.id === newTier
-    );
-    if (other) {
-      swapCardTiers(card, other);
-    } else {
-      card.dataset.id = newTier;
-      const rankInp = card.querySelector(".slot-rank");
-      if (rankInp) rankInp.value = String(defaultRankFor(newTier));
-    }
-  }
-
-  function renderModelsList(slots) {
-    state.slots = (slots || []).map((s) => ({ ...s }));
+  function renderModelsList(pool) {
+    state.slots = (pool || []).map((s) => ({ ...s }));
     setIdleStatusLine(state.slots);
-    fillTierSelect(els.addSlotTier, els.addSlotTier && els.addSlotTier.value);
+    fillTierSelect(els.addSlotTier, (els.addSlotTier && els.addSlotTier.value) || "");
     els.modelsList.innerHTML = "";
-    for (const slot of state.slots) {
+    const sorted = [...state.slots].sort((a, b) => {
+      const ra = a.tier != null ? Number(a.rank ?? 0) : 999;
+      const rb = b.tier != null ? Number(b.rank ?? 0) : 999;
+      return (
+        ra - rb ||
+        String(a.model || "").localeCompare(String(b.model || "")) ||
+        String(a.id).localeCompare(String(b.id))
+      );
+    });
+    for (const slot of sorted) {
       const card = document.createElement("div");
-      card.className = "slot-card";
+      const noTier = !(slot.tier || "").trim();
+      card.className = noTier ? "slot-card unbound" : "slot-card";
       card.dataset.id = slot.id;
       card.dataset.provider = slot.provider || "ollama";
 
       const head = document.createElement("div");
       head.className = "slot-card-head";
-      const idWrap = document.createElement("div");
-      idWrap.style.display = "flex";
-      idWrap.style.alignItems = "center";
-      idWrap.style.gap = "8px";
-      idWrap.style.flexWrap = "wrap";
 
-      const tierWrap = document.createElement("div");
-      tierWrap.className = "field-with-label tier-field";
-      const tierLab = document.createElement("label");
-      tierLab.className = "field-label";
-      tierLab.textContent = "Тир";
-      const tierSel = document.createElement("select");
-      tierSel.className = "tier-select slot-tier";
-      tierSel.title = "К какому тиру относится эта модель";
-      fillCardTierSelect(tierSel, slot.id);
-      tierSel.addEventListener("change", () => onCardTierChange(card, tierSel.value));
-      tierWrap.appendChild(tierLab);
-      tierWrap.appendChild(tierSel);
-      idWrap.appendChild(tierWrap);
+      const title = document.createElement("span");
+      title.className = "slot-id";
+      title.textContent = slot.model || slot.id;
+      title.title = slot.id;
+      head.appendChild(title);
+
+      const headRight = document.createElement("div");
+      headRight.className = "slot-card-head-right";
+
+      if (noTier) {
+        const badge = document.createElement("span");
+        badge.className = "slot-unbound-badge";
+        badge.textContent = "вручную";
+        badge.title = "Без тира — только ручной выбор в чате";
+        headRight.appendChild(badge);
+      }
 
       const provSel = document.createElement("select");
       provSel.className = "tier-select slot-provider";
-      provSel.title = "Провайдер модели";
+      provSel.title = "Провайдер";
       for (const [val, lab] of [
         ["ollama", "Ollama"],
         ["openrouter", "OpenRouter"],
@@ -729,10 +743,18 @@
       }
       provSel.value = slot.provider === "openrouter" ? "openrouter" : "ollama";
       provSel.addEventListener("change", () => syncCardProviderUi(card));
-      idWrap.appendChild(provSel);
-      head.appendChild(idWrap);
+      headRight.appendChild(provSel);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn btn-ghost danger btn-slot-delete";
+      del.textContent = "×";
+      del.title = "Убрать из пула";
+      del.addEventListener("click", () => removeSlot(card.dataset.id));
+      headRight.appendChild(del);
+
+      head.appendChild(headRight);
       card.appendChild(head);
-      ensureCardDeleteBtn(card);
 
       const meta = document.createElement("div");
       meta.className = "slot-meta";
@@ -741,8 +763,7 @@
       modelWrap.className = "field-with-label slot-model-wrap";
       const modelLab = document.createElement("label");
       modelLab.className = "field-label";
-      modelLab.textContent =
-        (slot.provider || "ollama") === "openrouter" ? "Модель OpenRouter" : "Модель";
+      modelLab.textContent = "Модель";
       let modelCtrl;
       if ((slot.provider || "ollama") === "openrouter") {
         modelCtrl = document.createElement("input");
@@ -750,13 +771,46 @@
         modelCtrl.type = "text";
         modelCtrl.value = slot.model || "";
         modelCtrl.placeholder = "provider/model-id";
+        modelCtrl.addEventListener("input", () => {
+          title.textContent = modelCtrl.value.trim() || slot.id;
+        });
       } else {
         modelCtrl = document.createElement("select");
         modelCtrl.className = "tier-select slot-model";
-        fillModelSelect(modelCtrl, slot.model);
+        fillModelSelect(modelCtrl, slot.model || "");
+        modelCtrl.addEventListener("change", () => {
+          title.textContent = modelCtrl.value || slot.id;
+        });
       }
       modelWrap.appendChild(modelLab);
       modelWrap.appendChild(modelCtrl);
+
+      const tierWrap = document.createElement("div");
+      tierWrap.className = "field-with-label tier-field";
+      const tierLab = document.createElement("label");
+      tierLab.className = "field-label";
+      tierLab.textContent = "Тир";
+      const tierSel = document.createElement("select");
+      tierSel.className = "tier-select slot-tier";
+      tierSel.title = "Тир для Auto или без роутинга";
+      fillCardTierSelect(tierSel, slot.tier || "");
+      tierSel.addEventListener("change", () => {
+        syncCardTierRank(card);
+        card.classList.toggle("unbound", !(tierSel.value || "").trim());
+        const badge = headRight.querySelector(".slot-unbound-badge");
+        if (!(tierSel.value || "").trim()) {
+          if (!badge) {
+            const b = document.createElement("span");
+            b.className = "slot-unbound-badge";
+            b.textContent = "вручную";
+            headRight.insertBefore(b, provSel);
+          }
+        } else if (badge) {
+          badge.remove();
+        }
+      });
+      tierWrap.appendChild(tierLab);
+      tierWrap.appendChild(tierSel);
 
       const rankWrap = document.createElement("div");
       rankWrap.className = "field-with-label rank-field";
@@ -768,38 +822,23 @@
       rankInp.type = "number";
       rankInp.min = "0";
       rankInp.max = "9";
-      rankInp.value = String(slot.rank ?? 1);
+      rankInp.value = noTier ? "" : String(slot.rank ?? defaultRankFor(slot.tier));
       rankInp.title = "Сила / порядок эскалации";
+      rankInp.disabled = noTier;
       rankWrap.appendChild(rankLab);
       rankWrap.appendChild(rankInp);
 
       meta.appendChild(modelWrap);
+      meta.appendChild(tierWrap);
       meta.appendChild(rankWrap);
       card.appendChild(meta);
 
-      const labelInp = document.createElement("input");
-      labelInp.className = "text-input slot-label";
-      labelInp.type = "text";
-      labelInp.value = slot.label || "";
-      labelInp.placeholder = "Подпись";
-      card.appendChild(labelInp);
-
       const promptInp = document.createElement("textarea");
       promptInp.className = "prompt-input slot-prompt";
-      promptInp.rows = 3;
+      promptInp.rows = 2;
       promptInp.value = slot.router_prompt || "";
-      promptInp.placeholder = "Когда роутеру выбирать этот тир…";
+      promptInp.placeholder = "Промпт для роутера (когда выбирать)…";
       card.appendChild(promptInp);
-
-      const autoLab = document.createElement("label");
-      autoLab.className = "check-label";
-      const autoCb = document.createElement("input");
-      autoCb.type = "checkbox";
-      autoCb.className = "slot-auto";
-      autoCb.checked = !!slot.router_auto;
-      autoLab.appendChild(autoCb);
-      autoLab.appendChild(document.createTextNode(" Участвует в Auto-роутере"));
-      card.appendChild(autoLab);
 
       els.modelsList.appendChild(card);
     }
@@ -809,45 +848,67 @@
     const out = [];
     const seen = new Set();
     for (const card of els.modelsList.querySelectorAll(".slot-card")) {
-      const tierEl = card.querySelector(".slot-tier");
-      const id = (tierEl && tierEl.value) || card.dataset.id;
+      const id = card.dataset.id;
       if (!id) continue;
       if (seen.has(id)) {
-        throw new Error(`Тир «${id}» выбран на двух карточках — оставьте уникальные`);
+        throw new Error(`Дубликат id «${id}»`);
       }
       seen.add(id);
-      card.dataset.id = id;
-      const prev = state.slots.find((s) => s.id === id) || {};
-      const fixed = (state.fixedTiers || []).find((t) => t.id === id) || {};
       const modelEl = card.querySelector(".slot-model");
       const provEl = card.querySelector(".slot-provider");
+      const tierEl = card.querySelector(".slot-tier");
+      const rankEl = card.querySelector(".slot-rank");
       const provider =
-        (provEl && provEl.value) || card.dataset.provider || prev.provider || "ollama";
+        (provEl && provEl.value) || card.dataset.provider || "ollama";
+      const model = ((modelEl && modelEl.value) || "").trim();
+      if (!model) {
+        throw new Error("У каждой записи пула должна быть модель");
+      }
+      const tier = ((tierEl && tierEl.value) || "").trim() || null;
       out.push({
         id,
-        model: (modelEl && modelEl.value) || "",
-        label: card.querySelector(".slot-label").value.trim(),
+        model,
+        label: model,
         router_prompt: card.querySelector(".slot-prompt").value.trim(),
-        rank: Number(card.querySelector(".slot-rank").value) || 0,
-        router_auto: card.querySelector(".slot-auto").checked,
-        required: fixed.required != null ? !!fixed.required : !!prev.required,
-        optional: fixed.optional != null ? !!fixed.optional : prev.optional !== false,
-        builtin: true,
+        tier,
+        rank: tier
+          ? Number(rankEl && rankEl.value) || defaultRankFor(tier)
+          : null,
         provider,
       });
     }
     return out;
   }
 
+  function poolFromPayload(data) {
+    if (!data) return [];
+    if (Array.isArray(data.pool) && data.pool.length && typeof data.pool[0] === "object") {
+      return data.pool;
+    }
+    if (Array.isArray(data.slots) && data.slots.length && typeof data.slots[0] === "object") {
+      return data.slots;
+    }
+    // settings PUT response: models = пул; health: models = теги Ollama (строки)
+    if (
+      Array.isArray(data.models) &&
+      data.models.length &&
+      typeof data.models[0] === "object"
+    ) {
+      return data.models;
+    }
+    return [];
+  }
+
   async function loadSettings() {
     const data = await api("/api/settings");
     state.routerModel = data.router_model || "";
     state.fixedTiers = data.fixed_tiers || [];
-    renderModelsList(data.slots || []);
-    populateTierSelect(data.slots || []);
+    const pool = poolFromPayload(data);
+    renderModelsList(pool);
+    populateTierSelect(pool);
     fillModelSelect(els.addSlotModel, els.addSlotModel.value || "");
     fillModelSelect(els.routerModelSelect, state.routerModel);
-    fillTierSelect(els.addSlotTier, els.addSlotTier && els.addSlotTier.value);
+    fillTierSelect(els.addSlotTier, (els.addSlotTier && els.addSlotTier.value) || "");
     renderOpenRouterStatus(data.providers);
     syncAddProviderUi();
     return data;
@@ -880,18 +941,19 @@
   async function saveModels() {
     setModelsStatus("Сохранение…");
     try {
-      const slots = collectSlotsFromDom();
+      const models = collectSlotsFromDom();
       const data = await api("/api/settings", {
         method: "PUT",
         body: JSON.stringify({
-          slots,
+          models,
           router_model: els.routerModelSelect.value || null,
         }),
       });
       state.routerModel = data.router_model || "";
       state.fixedTiers = data.fixed_tiers || state.fixedTiers;
-      renderModelsList(data.slots || []);
-      populateTierSelect(data.slots || []);
+      const pool = poolFromPayload(data);
+      renderModelsList(pool);
+      populateTierSelect(pool);
       fillModelSelect(els.routerModelSelect, state.routerModel);
       setModelsStatus("Сохранено", "ok");
       await refreshHealth();
@@ -901,12 +963,12 @@
   }
 
   async function persistDraftSlots() {
-    const slots = collectSlotsFromDom();
-    if (!slots.length) return null;
+    const models = collectSlotsFromDom();
+    if (!models.length) return null;
     return api("/api/settings", {
       method: "PUT",
       body: JSON.stringify({
-        slots,
+        models,
         router_model: els.routerModelSelect.value || null,
       }),
     });
@@ -914,15 +976,11 @@
 
   async function addModelSlot() {
     const provider = selectedAddProvider();
-    const tier = (els.addSlotTier && els.addSlotTier.value) || "";
+    const tier = ((els.addSlotTier && els.addSlotTier.value) || "").trim() || null;
     const model =
       provider === "openrouter"
         ? els.addSlotModelOr.value.trim()
         : els.addSlotModel.value.trim();
-    if (!tier) {
-      setModelsStatus("Выберите тир", "err");
-      return;
-    }
     if (!model) {
       setModelsStatus(
         provider === "openrouter"
@@ -932,34 +990,34 @@
       );
       return;
     }
-    setModelsStatus("Назначение…");
+    setModelsStatus("Добавление…");
     try {
       await persistDraftSlots();
       const body = {
         model,
         provider,
         tier,
-        label: els.addSlotLabel.value.trim() || null,
+        label: model,
         router_prompt: els.addSlotPrompt.value.trim() || null,
-        rank: Number.isFinite(Number(els.addSlotRank.value))
-          ? Number(els.addSlotRank.value)
-          : null,
-        router_auto: els.addSlotAuto.checked,
+        rank:
+          tier && Number.isFinite(Number(els.addSlotRank.value))
+            ? Number(els.addSlotRank.value)
+            : null,
       };
-      const data = await api("/api/settings/slots", {
+      const data = await api("/api/settings/models", {
         method: "POST",
         body: JSON.stringify(body),
       });
       state.routerModel = data.router_model || state.routerModel;
       state.fixedTiers = data.fixed_tiers || state.fixedTiers;
-      renderModelsList(data.slots || []);
-      populateTierSelect(data.slots || []);
+      const pool = poolFromPayload(data);
+      renderModelsList(pool);
+      populateTierSelect(pool);
       fillModelSelect(els.routerModelSelect, state.routerModel);
       renderOpenRouterStatus(data.providers);
-      els.addSlotLabel.value = "";
       els.addSlotPrompt.value = "";
       els.addSlotModelOr.value = "";
-      setModelsStatus(`Модель назначена на тир «${tier}»`, "ok");
+      setModelsStatus(`Добавлено: ${model}`, "ok");
       await refreshHealth();
     } catch (e) {
       setModelsStatus(e.message, "err");
@@ -968,38 +1026,40 @@
 
   async function removeSlot(id) {
     if (!id) return;
-    if (
-      !confirm(
-        `Сбросить тир «${id}» к модели по умолчанию?`
-      )
-    ) {
+    if ((state.slots || []).length <= 1) {
+      setModelsStatus(
+        "Нельзя удалить последнюю модель — в пуле должна остаться хотя бы одна",
+        "err"
+      );
       return;
     }
     setModelsStatus("Удаление…");
     try {
       await persistDraftSlots();
-      const data = await api(`/api/settings/slots/${encodeURIComponent(id)}`, {
+      const data = await api(`/api/settings/models/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
       state.fixedTiers = data.fixed_tiers || state.fixedTiers;
-      renderModelsList(data.slots || []);
-      populateTierSelect(data.slots || []);
-      setModelsStatus(`Тир «${id}» сброшен`, "ok");
+      const pool = poolFromPayload(data);
+      renderModelsList(pool);
+      populateTierSelect(pool);
+      setModelsStatus(`Удалено: ${id}`, "ok");
       await refreshHealth();
     } catch (e) {
-      setModelsStatus(e.message, "err");
+      setModelsStatus(e.message || "Не удалось удалить модель", "err");
     }
   }
 
   async function resetModels() {
-    if (!confirm("Сбросить модели и промпты роутера к значениям по умолчанию?")) return;
+    if (!confirm("Сбросить пул моделей и промпты к значениям по умолчанию?")) return;
     setModelsStatus("Сброс…");
     try {
       const data = await api("/api/settings/reset", { method: "POST", body: "{}" });
       state.routerModel = data.router_model || "";
       state.fixedTiers = data.fixed_tiers || [];
-      renderModelsList(data.slots || []);
-      populateTierSelect(data.slots || []);
+      const pool = poolFromPayload(data);
+      renderModelsList(pool);
+      populateTierSelect(pool);
       fillModelSelect(els.routerModelSelect, state.routerModel);
       setModelsStatus("Сброшено к defaults", "ok");
       await refreshHealth();
@@ -1012,13 +1072,15 @@
     try {
       const h = await api("/api/health");
       state.ollamaModels = h.models || [];
-      if (h.slots) {
-        populateTierSelect(h.slots);
-        setIdleStatusLine(h.slots);
+      const pool = poolFromPayload(h);
+      if (pool.length) {
+        populateTierSelect(pool);
+        setIdleStatusLine(pool);
       } else if (h.tiers) {
         const fromTiers = Object.entries(h.tiers).map(([id, model]) => ({
           id,
           model,
+          tier: id,
           label: `${id} · ${model}`,
         }));
         populateTierSelect(fromTiers);
@@ -1407,7 +1469,7 @@
       const res = await fetch(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: text, force_tier: forceTier() }),
+        body: JSON.stringify({ content: text, ...forceSelection() }),
       });
       if (!res.ok) {
         const err = await res.text();
@@ -1494,11 +1556,13 @@
   });
   if (els.addSlotTier) {
     els.addSlotTier.addEventListener("change", () => {
-      const slot = (state.slots || []).find((s) => s.id === els.addSlotTier.value);
-      if (slot && Number.isFinite(Number(slot.rank))) {
-        els.addSlotRank.value = String(slot.rank);
+      const hasTier = !!(els.addSlotTier.value || "").trim();
+      if (els.addSlotRank) {
+        els.addSlotRank.disabled = !hasTier;
+        if (hasTier && !els.addSlotRank.value) {
+          els.addSlotRank.value = String(defaultRankFor(els.addSlotTier.value));
+        }
       }
-      if (slot && slot.label) els.addSlotLabel.placeholder = slot.label;
     });
   }
   els.messages.addEventListener("click", (e) => {

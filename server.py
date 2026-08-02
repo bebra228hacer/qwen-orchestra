@@ -64,23 +64,27 @@ class CreateChatBody(BaseModel):
 class SendMessageBody(BaseModel):
     content: str
     force_tier: str | None = None
+    force_model: str | None = None
 
 
 class SettingsPutBody(BaseModel):
-    slots: list[dict[str, Any]]
+    models: list[dict[str, Any]] | None = None
+    slots: list[dict[str, Any]] | None = None  # compat
     router_model: str | None = None
 
 
-class AddSlotBody(BaseModel):
+class AddModelBody(BaseModel):
     model: str
     label: str | None = None
     router_prompt: str | None = None
-    # tier — какой из 10 фиксированных тиров заполнить; id — устаревший алиас
     tier: str | None = None
     id: str | None = None
     rank: int | None = None
-    router_auto: bool | None = None
     provider: str = "ollama"
+
+
+# Совместимость со старым именем
+AddSlotBody = AddModelBody
 
 
 class OpenRouterKeyBody(BaseModel):
@@ -193,17 +197,19 @@ def health() -> dict[str, Any]:
         missing_optional = missing_optional_models(have)
         router_missing = True
     or_status = app_settings.openrouter_status()
+    cfg = app_settings.get_settings()
     return {
-        # ok = есть ≥1 доступный тир (локальный или OpenRouter), даже если Ollama лежит
+        # ok = есть ≥1 доступная модель пула (локальная или OpenRouter)
         "ok": not missing,
         "ollama": ollama_ok,
         "models": models,
         "missing": missing,
         "missing_optional": missing_optional,
-        "router_model": app_settings.get_settings().router_model,
+        "router_model": cfg.router_model,
         "router_missing": router_missing,
-        "tiers": MODELS,
-        "slots": [s.to_dict() for s in app_settings.get_settings().slots],
+        "tiers": dict(MODELS),
+        "pool": [m.to_dict() for m in cfg.models],
+        "slots": [m.to_dict() for m in cfg.models],  # compat
         "providers": {"openrouter": or_status},
         "error": error,
     }
@@ -222,8 +228,11 @@ def get_settings() -> dict[str, Any]:
 
 @app.put("/api/settings")
 def put_settings(body: SettingsPutBody) -> dict[str, Any]:
+    payload = body.models if body.models is not None else body.slots
+    if payload is None:
+        raise HTTPException(status_code=400, detail="Нужен список models")
     try:
-        saved = app_settings.update_settings(body.slots, router_model=body.router_model)
+        saved = app_settings.update_settings(payload, router_model=body.router_model)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return app_settings.public_settings_payload(saved)
@@ -235,17 +244,17 @@ def reset_settings() -> dict[str, Any]:
     return app_settings.public_settings_payload(saved)
 
 
+@app.post("/api/settings/models")
 @app.post("/api/settings/slots")
-def add_settings_slot(body: AddSlotBody) -> dict[str, Any]:
+def add_settings_model(body: AddModelBody) -> dict[str, Any]:
     try:
-        saved = app_settings.add_slot(
+        saved = app_settings.add_model(
             model=body.model,
             label=body.label,
             router_prompt=body.router_prompt,
-            slot_id=body.id,
+            model_id=body.id,
             tier=body.tier,
             rank=body.rank,
-            router_auto=body.router_auto,
             provider=body.provider,
         )
     except ValueError as exc:
@@ -266,12 +275,13 @@ def put_openrouter_key(body: OpenRouterKeyBody) -> dict[str, Any]:
     return app_settings.public_settings_payload()
 
 
-@app.delete("/api/settings/slots/{slot_id}")
-def delete_settings_slot(slot_id: str) -> dict[str, Any]:
+@app.delete("/api/settings/models/{model_id:path}")
+@app.delete("/api/settings/slots/{model_id:path}")
+def delete_settings_model(model_id: str) -> dict[str, Any]:
     try:
-        saved = app_settings.delete_slot(slot_id)
+        saved = app_settings.delete_model(model_id)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"Слот не найден: {slot_id}") from exc
+        raise HTTPException(status_code=404, detail=f"Модель не найдена: {model_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return app_settings.public_settings_payload(saved)
@@ -511,6 +521,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                 content,
                 history,
                 force_tier=body.force_tier,
+                force_model=body.force_model,
                 stream=True,
                 verbose=False,
                 on_token=on_token,

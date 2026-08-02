@@ -17,18 +17,17 @@ alwaysApply: true
 - Лаунчер: `open_web.py` / `QwenChat.exe` (при необходимости `ollama serve`, ждёт `/api/ready`, открывает браузер; свою Ollama гасит при выходе)
 - Установка: `pip install -e ".[web]"`; публичный вход для приложений — `from qwen_orchestra import Client`
 
-## Тиры
+## Тиры и пул
 
-Ровно **10 фиксированных** (id = force_tier):  
+Ровно **10 фиксированных** id тиров (семантика роутера / floor):  
 `tiny` · `nano` · `small` · `mid` · `large` · `heavy` · `xlarge` · `coder` · `ultra` · `frontier`  
 
-Defaults: `0.8b` · nano · `2b` · `4b` · `7b` · `9b` · `14b` · coder · ultra · frontier (часто OpenRouter).
-
-Слоты и промпты роутера — `qwen_orchestra/settings.py` / `settings.json`, UI «Модели и промпты» (выпадающий список тира).
-На любом тире можно `provider: openrouter` (ключ — env / `secrets.json`); worker без tools на OR.
-Эскалация по `rank`; тяжёлый код стартует на `coder`. Жёстких required-тиров нет — health ok при ≥1 доступной модели; отсутствующие слоты — warning.
+Пул `models[]` в `settings.json` / UI «Модели и промпты»: у записи provider, model, prompt, опционально **tier+rank**.
+С тиром — Auto и эскалация (несколько моделей на тир → max rank); без тира — только ручной `force_model`.
+Эскалация после selfcheck — следующая available-модель с большим rank.
+Health ok при ≥1 доступной модели пула.
 Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код; при отсутствии тира — `_fit_tier` к ближайшему доступному.
-Тексты для LLM-роутера — editable per-slot `router_prompt` (не путать с `tier_floor`).
+Тексты для LLM-роутера — editable per-model `router_prompt` (не путать с `tier_floor`).
 Для Qwen3.5 в `llm.py` всегда `think: false` (роутер/tools/стрим без thinking).
 
 ## Контекст

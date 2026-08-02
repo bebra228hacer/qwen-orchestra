@@ -990,18 +990,34 @@ input {
 .modal-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
 }
 
 .slot-card {
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   background: var(--bg);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   color: var(--text);
+}
+
+.slot-card.unbound {
+  opacity: 0.78;
+  border-style: dashed;
+}
+
+.slot-unbound-badge {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  flex-shrink: 0;
 }
 
 .slot-card-head {
@@ -1009,12 +1025,37 @@ input {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: 28px;
+}
+
+.slot-card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.slot-card-head-right .slot-provider {
+  width: auto;
+  min-width: 108px;
+  max-width: 130px;
+}
+
+.slot-card-head-right .btn-slot-delete {
+  padding: 2px 8px;
+  min-width: 28px;
+  font-size: 16px;
+  line-height: 1.2;
 }
 
 .slot-id {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .slot-provider-badge {
@@ -1035,9 +1076,14 @@ input {
 
 .slot-meta {
   display: grid;
-  grid-template-columns: 1fr 88px;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 130px) 64px;
+  gap: 6px;
   align-items: end;
+}
+
+.slot-card .prompt-input {
+  min-height: 44px;
+  font-size: 12px;
 }
 
 .or-key-row {

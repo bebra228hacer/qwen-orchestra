@@ -107,9 +107,9 @@ print(result.text, result.tier, result.model)
 
 ## Веб-UI (кратко)
 
-- Слева — чаты; Composer; селектор Auto / тиры
+- Слева — чаты; Composer; селектор Auto / модели пула
 - Markdown + код + LaTeX; чипы tier / ctx / история / selfcheck
-- «Модели и промпты» — 10 тиров, Ollama/OpenRouter, промпты роутера
+- «Модели и промпты» — пул моделей (тир опционален), Ollama/OpenRouter; «Удалить» убирает из пула
 - Правая панель — монитор CPU/RAM/GPU/температуры/Ollama
 - Чаты in-memory (сброс при рестарте сервера)
 

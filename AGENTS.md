@@ -11,9 +11,9 @@
 ## Обязательные зависимости среды
 
 1. Сервис **Ollama** запущен (`http://localhost:11434`).
-2. Хотя бы одна модель из слотов оркестра (`ollama pull …` или OpenRouter-ключ).
+2. Хотя бы одна модель в пуле оркестра (`ollama pull …` или OpenRouter-ключ).
 3. Рекомендуемый набор: tiny/mid/heavy + по желанию nano…frontier.
-4. Опционально: OpenRouter API key (`OPENROUTER_API_KEY` или UI → secrets.json) для внешних слотов.
+4. Опционально: OpenRouter API key (`OPENROUTER_API_KEY` или UI → secrets.json) для внешних моделей.
 5. Python: `pip install -e ".[web]"` или `pip install -r requirements.txt` (`ddgs`, `psutil`; для веба — `fastapi`, `uvicorn`, `pydantic`).
 6. Публичный SDK: `from qwen_orchestra import Client` (in-process; см. `examples/ask_sdk.py`).
 7. Фронтенд (vendored, без npm): см. `web/vendor/` —
@@ -65,7 +65,7 @@ client = Client()                      # или ollama_host=..., settings_path=.
 client.ready() / client.health()
 client.route(text)                     # RouteDecision
 client.ask(text, history=..., on_token=...)  # OrchestraResult, verbose=False
-client.get_settings() / update_settings(...) / add_slot(...) / delete_slot(...)
+client.get_settings() / update_settings(...) / add_model(...) / delete_model(...)
 client.set_openrouter_api_key(...)  # secrets.json; None — очистить
 ```
 
@@ -73,13 +73,15 @@ client.set_openrouter_api_key(...)  # secrets.json; None — очистить
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом (не в git).
 Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не при голом импорте модулей.
 
-### OpenRouter на тирах
+### Пул моделей и OpenRouter
 
-- В UI «Модели и промпты»: выберите тир, провайдер OpenRouter + id модели (`anthropic/claude-sonnet-4`) + rank/prompt.
-- Поле слота `provider`: `ollama` (default) | `openrouter` (на любом из 10 тиров).
+- В UI «Модели и промпты»: пул записей (provider + model + label + prompt + опционально tier/rank).
+- **`tier` задан** → Auto и эскалация; несколько моделей на один тир — ответ с max rank.
+- **`tier` пуст** → только ручной выбор (`force_model`).
+- Поле `provider`: `ollama` (default) | `openrouter`.
 - Worker ходит в OpenRouter chat/completions (stream); **tools пока только на Ollama**.
 - Роутер и selfcheck остаются локальными (tiny/mid).
-- Availability: ключ задан → слот доступен; иначе как optional missing (`openrouter:…`).
+- Availability: ключ задан → OR-модель доступна; иначе missing (`openrouter:…`).
 - API: `PUT /api/settings/providers/openrouter` `{ "api_key": "…" }` / `{ "clear": true }`.
 
 ## Оркестр — как работает
@@ -87,19 +89,20 @@ Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не пр�
 ```
 user → route → plan context → worker (± web tools) → selfcheck
                  ↑                                      │ не ok
-                 └──── retry на тир выше ───────────────┘  (до MAX_ATTEMPTS)
+                 └──── retry на модель с большим rank ──┘  (до MAX_ATTEMPTS)
 ```
 
-- Тиры: ровно **10 фиксированных** id: `tiny` / `nano` / `small` / `mid` / `large` / `heavy` / `xlarge` / `coder` / `ultra` / `frontier`.
-- Обязательных тиров нет: health ok при ≥1 доступной модели; неустановленные — в `missing_optional`.
-- Промпты роутера («когда использовать») — per-slot `router_prompt`; собираются в `router.SYSTEM`.
-- Эскалация: по `rank` тиров; `coder` → ultra/frontier/xlarge при retry.
-- UI: «Модели и промпты» — remap моделей, выпадающий список тира, OpenRouter-ключ, промпты; «Назначить на тир».
-- Публичный вход: `orchestra.handle(user_text, history, force_tier=…, stream=…, verbose=…, on_token=…, on_status=…)`.
+- Тиры (семантика роутера): **10 фиксированных** id: `tiny` / `nano` / `small` / `mid` / `large` / `heavy` / `xlarge` / `coder` / `ultra` / `frontier`.
+- Пул в `settings.json` → `models[]` (старый `slots[]` мигрирует при загрузке).
+- Обязательных тиров нет: health ok при ≥1 доступной модели пула; недоступные — в `missing_optional`.
+- Промпты роутера — per-model `router_prompt` у записей с тиром; собираются в `router.SYSTEM`.
+- Эскалация: следующая available-модель с **большим rank**.
+- UI: пул, тир/rank, OpenRouter-ключ, промпты; «Добавить в пул» / «Удалить» из пула.
+- Публичный вход: `orchestra.handle(..., force_tier=…, force_model=…, stream=…, verbose=…, on_token=…, on_status=…)`.
 - История в `handle` **без** текущего user-сообщения (сервер так и передаёт; CLI тоже; если хвост дублирует вопрос — он снимается).
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
 - События `on_status`: `route`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`.
-- Эскалация пропускает неустановленные optional-тиры; `force_tier` только из десятки, иначе ошибка.
+- `force_model` — id записи пула; `force_tier` — лучшая available-модель тира (compat).
 - `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason` (метаданные — от **выбранной** попытки).
 
 ## Auto-режим: когда какая модель
@@ -128,11 +131,11 @@ user → route → plan context → worker (± web tools) → selfcheck
 - Детерминированные shortcuts **без** вызова tiny: приветствия, web-intent,
   floor `mid`/`heavy`/`coder`. tiny остаётся для неоднозначных коротких запросов.
 - `need_web` — детерминированно (`need_web()` / hard+soft ключи, в т.ч. «поищи»,
-  «погугли»); при `force_tier` LLM-роутер **не** вызывается.
+  «погугли»); при `force_tier` / `force_model` LLM-роутер **не** вызывается.
 - `ok=false` от tiny **игнорируется**, если запрос осмысленный (`looks_meaningful`):
   есть слова с гласными или простая арифметика. Пустой ввод и «??» отклоняются сразу,
   мусор — после второго мнения mid (4b).
-- Ручной выбор тира (`force_tier` / селектор в UI) обходит модельный роутер;
+- Ручной выбор модели (`force_model` / селектор в UI) или тира (`force_tier`) обходит модельный роутер;
   web определяется правилами.
 - Qwen3.5 вызывается с `think: false` (см. `llm.py`), чтобы не ломать JSON/tools.
 
@@ -207,19 +210,19 @@ Web-tool результаты **кэшируются** между retry (пов�
 | Метод | Путь | Назначение |
 |---|---|---|
 | GET | `/api/ready` | Быстрый ping (лаунчер; **без** Ollama) |
-| GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `slots` |
+| GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `pool` |
 | GET | `/api/metrics` | CPU / RAM / GPU / температуры / загруженные модели Ollama (`/api/ps`) |
-| GET/PUT | `/api/settings` | Слоты моделей + `router_model` + промпты роутера (`settings.json`) |
+| GET/PUT | `/api/settings` | Пул `models` + `router_model` (`settings.json`) |
 | PUT | `/api/settings/providers/openrouter` | API-ключ OpenRouter (`secrets.json`; `{api_key}` / `{clear:true}`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
-| POST | `/api/settings/slots` | Назначить модель на тир (`tier` + `provider`: ollama\|openrouter) |
-| DELETE | `/api/settings/slots/{id}` | Сброс любого тира к defaults |
+| POST | `/api/settings/models` | Добавить/обновить модель в пуле (`tier` опционален) |
+| DELETE | `/api/settings/models/{id}` | Убрать модель из пула |
 | GET/POST | `/api/chats` | Список / создать |
 | GET/DELETE | `/api/chats/{id}` | История / удалить (409 если идёт генерация) |
 | POST | `/api/chats/{id}/clear` | Очистить (409 если идёт генерация) |
 | POST | `/api/chats/{id}/messages` | SSE ответ (409 при параллельном POST) |
 
-Тело сообщения: `{ "content": "...", "force_tier": null|"tiny"|"nano"|…|"ultra"|"frontier" }` (один из 10).
+Тело сообщения: `{ "content": "...", "force_model": null|"ollama:…", "force_tier": null|"tiny"|… }` (`force_model` — id пула; `force_tier` — compat).
 
 SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 
@@ -231,9 +234,9 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 Middleware: только Host `127.0.0.1`/`localhost` (+порт); для мутаций — Origin localhost (защита от DNS rebinding).
 Параллельные сообщения / clear / delete сериализуются worker-lock’ом; после clear ответ старого worker не дописывается (`generation`).
 
-`/api/health`: `ok` = есть ≥1 доступный тир (Ollama или OpenRouter); `missing` критичен; `missing_optional` — остальные недоступные слоты (не ломают ok);
+`/api/health`: `ok` = есть ≥1 доступная модель пула (Ollama или OpenRouter); `missing` критичен; `missing_optional` — назначенные, но недоступные (не ломают ok);
 `router_missing` — модель роутера из settings не найдена в Ollama.
-Один запрос `/api/tags` на health (список моделей переиспользуется).
+`pool` / `slots` (compat) — записи пула; `tiers` — derived map tier→лучшая модель.
 
 `/api/metrics`: снимок для правой панели — `cpu`, `ram`, `gpu[]` (util, VRAM, `temp_gpu_c`, `temp_memory_c`, пороги), `ollama.models[]`
 с `gpu_ratio`/`cpu_ratio`/`place` (из `size_vram`/`size`). Кэш ~0.6 с. Без NVIDIA секции GPU/температур пустые.
@@ -292,7 +295,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 2. Стрим в UI — только через колбэки оркестра + SSE.
 3. Новые проверки ответа — в `qwen_orchestra/selfcheck.py` (код проблемы + текст в `HINTS`);
    жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling`;
-   тексты «когда модель» для LLM-роутера и список слотов — в `settings.py` / UI;
+   тексты «когда модель» для LLM-роутера и пул моделей — в `settings.py` / UI;
    размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`.
 4. Лаунчер readiness — только `/api/ready`; тяжёлые проверки Ollama — в `/api/health`.
 5. Не слушать `0.0.0.0` без явной просьбы пользователя.

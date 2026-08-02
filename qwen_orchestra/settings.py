@@ -1,13 +1,14 @@
-"""Персистентные настройки оркестра: слоты моделей + промпты роутера.
+"""Персистентные настройки оркестра: пул моделей + промпты роутера.
 
 Файл: settings.json — в корне репозитория при разработке, иначе в user config
 (`%LOCALAPPDATA%/qwen-orchestra` / `~/.config/qwen-orchestra`).
 
-Ровно **10 фиксированных тиров** (id = tier): tiny → nano → small → mid →
-large → heavy → xlarge / coder → ultra → frontier. Удалять нельзя; можно
-сменить модель (Ollama или OpenRouter), подпись, rank и промпт «когда
-использовать». Старые кастомные id (не из десятки) при загрузке мигрируют
-в small/frontier.
+Пул `models[]`: каждая запись — provider/model/label/prompt и опционально
+tier+rank. Тир задан → Auto и эскалация; без тира — только ручной выбор.
+На один тир можно несколько моделей (приоритет по rank).
+
+Семантика 10 тиров (tiny…frontier) сохраняется для floor/ceiling роутера.
+Старый формат `slots[]` мигрирует в `models[]` при загрузке.
 
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом с settings
 (не коммитить).
@@ -27,12 +28,12 @@ from typing import Any
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent
 
-_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/=+\-]{0,120}$")
 _PROVIDERS = frozenset({"ollama", "openrouter"})
 DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 _lock = threading.RLock()
-# Синхронизация apply_to_runtime ↔ orchestra.handle (снимок слотов)
+# Синхронизация apply_to_runtime ↔ orchestra.handle (снимок пула)
 runtime_lock = threading.RLock()
 _bootstrapped = False
 
@@ -59,7 +60,6 @@ def default_settings_path() -> Path:
 
 
 SETTINGS_PATH: Path = default_settings_path()
-# Совместимость со старым именем ROOT (= каталог с settings при разработке)
 ROOT = SETTINGS_PATH.parent
 
 
@@ -157,7 +157,6 @@ def openrouter_status() -> dict[str, Any]:
     }
 
 
-# Промпты по умолчанию: когда роутеру выбирать этот слот
 DEFAULT_ROUTER_PROMPTS: dict[str, str] = {
     "tiny": (
         "Приветствия, благодарности, прощания, простая арифметика (2+2), "
@@ -202,7 +201,6 @@ DEFAULT_ROUTER_PROMPTS: dict[str, str] = {
     ),
 }
 
-# Ровно 10 тиров: id слота = force_tier / ответ роутера. Порядок эскалации по rank.
 FIXED_TIER_IDS: tuple[str, ...] = (
     "tiny",
     "nano",
@@ -217,127 +215,18 @@ FIXED_TIER_IDS: tuple[str, ...] = (
 )
 FIXED_TIERS = frozenset(FIXED_TIER_IDS)
 
-DEFAULT_SLOTS: list[dict[str, Any]] = [
-    {
-        "id": "tiny",
-        "model": "qwen3.5:0.8b",
-        "label": "tiny · 3.5 0.8b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["tiny"],
-        "required": False,
-        "optional": True,
-        "rank": 0,
-        "router_auto": True,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "nano",
-        "model": "qwen3.5:0.8b",
-        "label": "nano · 3.5 0.8b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["nano"],
-        "required": False,
-        "optional": True,
-        "rank": 1,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "small",
-        "model": "qwen3.5:2b",
-        "label": "small · 3.5 2b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["small"],
-        "required": False,
-        "optional": True,
-        "rank": 2,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "mid",
-        "model": "qwen3.5:4b",
-        "label": "mid · 3.5 4b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["mid"],
-        "required": False,
-        "optional": True,
-        "rank": 3,
-        "router_auto": True,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "large",
-        "model": "qwen2.5:7b",
-        "label": "large · 2.5 7b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["large"],
-        "required": False,
-        "optional": True,
-        "rank": 4,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "heavy",
-        "model": "qwen3.5:9b",
-        "label": "heavy · 3.5 9b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["heavy"],
-        "required": False,
-        "optional": True,
-        "rank": 5,
-        "router_auto": True,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "xlarge",
-        "model": "qwen2.5:14b",
-        "label": "xlarge · 14b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["xlarge"],
-        "required": False,
-        "optional": True,
-        "rank": 6,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "coder",
-        "model": "qwen2.5-coder:14b",
-        "label": "coder · 14b",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["coder"],
-        "required": False,
-        "optional": True,
-        "rank": 6,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "ultra",
-        "model": "qwen2.5:14b",
-        "label": "ultra · 14b+",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["ultra"],
-        "required": False,
-        "optional": True,
-        "rank": 7,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
-    {
-        "id": "frontier",
-        "model": "qwen2.5:14b",
-        "label": "frontier · топ / внешний",
-        "router_prompt": DEFAULT_ROUTER_PROMPTS["frontier"],
-        "required": False,
-        "optional": True,
-        "rank": 8,
-        "router_auto": False,
-        "builtin": True,
-        "provider": "ollama",
-    },
+# Defaults: одна модель на тир (миграция / reset)
+_DEFAULT_POOL_SPEC: list[tuple[str, str, str, int]] = [
+    ("tiny", "qwen3.5:0.8b", "tiny · 3.5 0.8b", 0),
+    ("nano", "qwen3.5:0.8b", "nano · 3.5 0.8b", 1),
+    ("small", "qwen3.5:2b", "small · 3.5 2b", 2),
+    ("mid", "qwen3.5:4b", "mid · 3.5 4b", 3),
+    ("large", "qwen2.5:7b", "large · 2.5 7b", 4),
+    ("heavy", "qwen3.5:9b", "heavy · 3.5 9b", 5),
+    ("xlarge", "qwen2.5:14b", "xlarge · 14b", 6),
+    ("coder", "qwen2.5-coder:14b", "coder · 14b", 6),
+    ("ultra", "qwen2.5:14b", "ultra · 14b+", 7),
+    ("frontier", "qwen2.5:14b", "frontier · топ / внешний", 8),
 ]
 
 DEFAULT_ROUTER_MODEL = "qwen3.5:0.8b"
@@ -365,39 +254,50 @@ ROUTER_SYSTEM_FOOTER = """
 
 
 @dataclass
-class ModelSlot:
+class PoolModel:
+    """Запись пула: модель + опциональный тир для Auto."""
+
     id: str
     model: str
+    provider: str
     label: str
     router_prompt: str
-    required: bool = False
-    optional: bool = True
-    rank: int = 1
-    router_auto: bool = True
-    builtin: bool = False
-    provider: str = "ollama"  # ollama | openrouter
+    tier: str | None = None
+    rank: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @property
+    def in_routing(self) -> bool:
+        return bool(self.tier) and bool((self.model or "").strip())
+
+
+# Алиас для совместимости импортов
+ModelSlot = PoolModel
+
 
 @dataclass
 class AppSettings:
-    slots: list[ModelSlot] = field(default_factory=list)
+    models: list[PoolModel] = field(default_factory=list)
     router_model: str = DEFAULT_ROUTER_MODEL
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "router_model": self.router_model,
-            "slots": [s.to_dict() for s in self.slots],
+            "models": [m.to_dict() for m in self.models],
         }
+
+    # Совместимость: старый код ждал .slots
+    @property
+    def slots(self) -> list[PoolModel]:
+        return self.models
 
 
 _settings: AppSettings | None = None
 
 
-def _normalize_provider(raw: Any, *, builtin: bool = False) -> str:
-    del builtin  # провайдер можно менять и на фиксированных тирах (Ollama / OpenRouter)
+def _normalize_provider(raw: Any) -> str:
     name = str(raw or "ollama").strip().lower() or "ollama"
     if name not in _PROVIDERS:
         raise ValueError(f"Неизвестный provider: {name!r} (ожидается ollama|openrouter)")
@@ -409,120 +309,181 @@ def _normalize_router_model(raw: Any, *, fallback: str = DEFAULT_ROUTER_MODEL) -
     return name or fallback
 
 
-def _slot_from_dict(raw: dict[str, Any], *, fallback: dict[str, Any] | None = None) -> ModelSlot:
-    base = dict(fallback or {})
-    base.update({k: v for k, v in raw.items() if v is not None})
-    sid = str(base.get("id") or "").strip().lower()
-    if not _ID_RE.match(sid):
-        raise ValueError(f"Некорректный id слота: {sid!r}")
-    if sid not in FIXED_TIERS:
-        raise ValueError(
-            f"Неизвестный tier: {sid}. Допустимы: {', '.join(FIXED_TIER_IDS)}"
-        )
-    model = str(base.get("model") or "").strip()
+def _sanitize_id_part(text: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_.:/=+\-]+", "_", (text or "").strip())
+    return s[:80] or "model"
+
+
+def make_pool_id(provider: str, model: str, *, used: set[str] | None = None) -> str:
+    """Стабильный id: provider:model; при коллизии — суффикс."""
+    base = f"{provider}:{_sanitize_id_part(model)}"
+    if not _ID_RE.match(base):
+        base = f"{provider}_{_sanitize_id_part(model)}"
+    if used is None:
+        return base
+    if base not in used:
+        used.add(base)
+        return base
+    n = 2
+    while f"{base}#{n}" in used:
+        n += 1
+    cid = f"{base}#{n}"
+    used.add(cid)
+    return cid
+
+
+def _pool_from_dict(raw: dict[str, Any], *, used_ids: set[str] | None = None) -> PoolModel:
+    provider = _normalize_provider(raw.get("provider"))
+    model = str(raw.get("model") or "").strip()
     if not model:
-        raise ValueError(f"Пустое имя модели для слота {sid}")
-    label = str(base.get("label") or model).strip() or model
-    prompt = str(base.get("router_prompt") or "").strip()
+        raise ValueError("У записи пула должно быть непустое имя модели")
+    pid = str(raw.get("id") or "").strip()
+    if not pid:
+        pid = make_pool_id(provider, model, used=used_ids)
+    elif used_ids is not None:
+        if pid in used_ids:
+            pid = make_pool_id(provider, model, used=used_ids)
+        else:
+            used_ids.add(pid)
+    label = str(raw.get("label") or "").strip() or (
+        model if provider == "ollama" else f"{model} · OR"
+    )
+    tier_raw = raw.get("tier")
+    if tier_raw is None and "id" in raw and str(raw.get("id") or "").lower() in FIXED_TIERS:
+        # Миграция старого слота: id был тиром
+        tier_raw = raw["id"]
+    tier: str | None
+    if tier_raw is None or str(tier_raw).strip() == "" or str(tier_raw).strip().lower() in {
+        "none",
+        "null",
+        "-",
+        "manual",
+    }:
+        tier = None
+    else:
+        tier = str(tier_raw).strip().lower()
+        if tier not in FIXED_TIERS:
+            raise ValueError(
+                f"Неизвестный tier: {tier}. Допустимы: {', '.join(FIXED_TIER_IDS)} или пусто"
+            )
+    rank: int | None
+    if tier is None:
+        rank = None
+    else:
+        if raw.get("rank") is None:
+            default_rank = next(
+                (r for t, _m, _l, r in _DEFAULT_POOL_SPEC if t == tier), 1
+            )
+            rank = int(default_rank)
+        else:
+            rank = int(raw["rank"])
+    prompt = str(raw.get("router_prompt") or "").strip()
     if not prompt:
-        prompt = DEFAULT_ROUTER_PROMPTS.get(sid, "Используй для задач, которые подходят этой модели.")
-    default_meta = next((d for d in DEFAULT_SLOTS if d["id"] == sid), {})
-    builtin = True  # все 10 тиров фиксированные
-    return ModelSlot(
-        id=sid,
+        if tier:
+            prompt = DEFAULT_ROUTER_PROMPTS.get(
+                tier, "Используй для задач, которые подходят этой модели."
+            )
+        else:
+            prompt = f"Модель `{model}` — только ручной выбор (вне Auto)."
+    return PoolModel(
+        id=pid,
         model=model,
+        provider=provider,
         label=label,
         router_prompt=prompt,
-        required=bool(default_meta.get("required", base.get("required", False))),
-        optional=bool(default_meta.get("optional", base.get("optional", True))),
-        rank=int(base.get("rank", default_meta.get("rank", 1))),
-        router_auto=bool(base.get("router_auto", default_meta.get("router_auto", True))),
-        builtin=builtin,
-        provider=_normalize_provider(base.get("provider"), builtin=builtin),
+        tier=tier,
+        rank=rank,
     )
+
+
+def _default_pool() -> list[PoolModel]:
+    used: set[str] = set()
+    out: list[PoolModel] = []
+    for tier, model, label, rank in _DEFAULT_POOL_SPEC:
+        out.append(
+            _pool_from_dict(
+                {
+                    "id": make_pool_id("ollama", model, used=used),
+                    "model": model,
+                    "provider": "ollama",
+                    "label": label,
+                    "tier": tier,
+                    "rank": rank,
+                    "router_prompt": DEFAULT_ROUTER_PROMPTS[tier],
+                },
+                used_ids=None,
+            )
+        )
+    return out
 
 
 def default_settings() -> AppSettings:
-    return AppSettings(
-        slots=[_slot_from_dict(s) for s in DEFAULT_SLOTS],
-        router_model=DEFAULT_ROUTER_MODEL,
-    )
+    return AppSettings(models=_default_pool(), router_model=DEFAULT_ROUTER_MODEL)
 
 
-def _absorb_custom_into_fixed(
-    by_id: dict[str, dict[str, Any]],
-    order: list[str],
-    customs: list[tuple[str, dict[str, Any]]],
-) -> None:
-    """Старые свободные id (dsflash и т.п.) → модель на small/frontier."""
-    used_targets: set[str] = set()
-    for sid, custom in customs:
-        rank = int(custom.get("rank", 2) or 2)
-        targets = ["frontier", "small"] if rank >= 3 else ["small", "frontier"]
-        target = next((t for t in targets if t not in used_targets), targets[0])
-        used_targets.add(target)
-        base = dict(by_id[target])
-        if custom.get("model"):
-            base["model"] = custom["model"]
-        if custom.get("label"):
-            base["label"] = custom["label"]
-        if custom.get("router_prompt"):
-            base["router_prompt"] = custom["router_prompt"]
-        if custom.get("provider") is not None:
-            base["provider"] = custom["provider"]
-        if "router_auto" in custom and custom["router_auto"] is not None:
-            base["router_auto"] = custom["router_auto"]
-        by_id[target] = base
-        if sid in order:
-            order.remove(sid)
-
-
-def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
-    """Всегда ровно 10 фиксированных тиров; кастомные id мигрируют в small/frontier."""
-    defaults_by_id = {s["id"]: s for s in DEFAULT_SLOTS}
-    raw = raw if isinstance(raw, dict) else {}
-    raw_slots = list(raw.get("slots") or [])
-    by_id: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    customs: list[tuple[str, dict[str, Any]]] = []
-
-    for d in DEFAULT_SLOTS:
-        by_id[d["id"]] = dict(d)
-        order.append(d["id"])
-
-    fixed_in_file = 0
+def _slots_to_pool(raw_slots: list[Any]) -> list[dict[str, Any]]:
+    """Миграция старого slots[] → сырые dict для PoolModel."""
+    used: set[str] = set()
+    out: list[dict[str, Any]] = []
     for item in raw_slots:
         if not isinstance(item, dict):
             continue
+        model = str(item.get("model") or "").strip()
+        if not model:
+            continue  # свободный тир — пропускаем
         sid = str(item.get("id") or "").strip().lower()
-        if not sid:
+        provider = _normalize_provider(item.get("provider"))
+        tier = sid if sid in FIXED_TIERS else item.get("tier")
+        # router_auto=false на старом слоте → без тира (только вручную)
+        if item.get("router_auto") is False and sid in FIXED_TIERS:
+            # План: участие = наличие тира. Старый router_auto=false оставляем с тиром
+            # (эскалация/ручной тир), но в Auto enum не попадёт через tiered list —
+            # фактически все с tier в routing. Оставляем tier.
+            pass
+        pid = make_pool_id(provider, model, used=used)
+        out.append(
+            {
+                "id": pid,
+                "model": model,
+                "provider": provider,
+                "label": item.get("label") or model,
+                "router_prompt": item.get("router_prompt"),
+                "tier": tier if tier in FIXED_TIERS else None,
+                "rank": item.get("rank"),
+            }
+        )
+    return out
+
+
+def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
+    raw = raw if isinstance(raw, dict) else {}
+    raw_models = list(raw.get("models") or [])
+    if not raw_models and raw.get("slots"):
+        raw_models = _slots_to_pool(list(raw.get("slots") or []))
+    if not raw_models:
+        return default_settings()
+
+    used: set[str] = set()
+    models: list[PoolModel] = []
+    for item in raw_models:
+        if not isinstance(item, dict):
             continue
-        if sid in defaults_by_id:
-            fixed_in_file += 1
-            merged = dict(defaults_by_id[sid])
-            for key in ("model", "label", "router_prompt", "router_auto", "rank", "provider"):
-                if key in item and item[key] is not None:
-                    merged[key] = item[key]
-            by_id[sid] = merged
-        else:
-            customs.append((sid, dict(item)))
+        try:
+            models.append(_pool_from_dict(item, used_ids=used))
+        except (ValueError, TypeError):
+            continue
+    if not models:
+        return default_settings()
 
-    if customs:
-        _absorb_custom_into_fixed(by_id, order, customs)
-
-    # При расширении лестницы (7→10 и т.п.) выровнять rank по новой схеме
-    if fixed_in_file < len(FIXED_TIER_IDS):
-        for sid, default in defaults_by_id.items():
-            if sid in by_id:
-                by_id[sid] = {**by_id[sid], "rank": default["rank"]}
-
-    slots = [_slot_from_dict(by_id[sid], fallback=defaults_by_id.get(sid)) for sid in order]
-    tiny_model = next((s.model for s in slots if s.id == "tiny"), DEFAULT_ROUTER_MODEL)
-    router_model = _normalize_router_model(
-        raw.get("router_model"),
-        fallback=tiny_model or DEFAULT_ROUTER_MODEL,
+    tiny = next(
+        (m.model for m in models if m.tier == "tiny" and m.provider == "ollama"),
+        next(
+            (m.model for m in models if m.provider == "ollama"),
+            DEFAULT_ROUTER_MODEL,
+        ),
     )
-    return AppSettings(slots=slots, router_model=router_model)
+    router_model = _normalize_router_model(raw.get("router_model"), fallback=tiny)
+    return AppSettings(models=models, router_model=router_model)
 
 
 def load_settings(*, path: Path | None = None) -> AppSettings:
@@ -544,8 +505,9 @@ def load_settings(*, path: Path | None = None) -> AppSettings:
 
 
 def deepcopy_settings(src: AppSettings) -> AppSettings:
+    used: set[str] = set()
     return AppSettings(
-        slots=[_slot_from_dict(s.to_dict()) for s in src.slots],
+        models=[_pool_from_dict(m.to_dict(), used_ids=used) for m in src.models],
         router_model=src.router_model,
     )
 
@@ -588,67 +550,105 @@ def reset_settings(*, path: Path | None = None) -> AppSettings:
     return save_settings(default_settings(), path=path)
 
 
-def slots_by_id(settings: AppSettings | None = None) -> dict[str, ModelSlot]:
+def models_by_id(settings: AppSettings | None = None) -> dict[str, PoolModel]:
     s = settings or get_settings()
-    return {slot.id: slot for slot in s.slots}
+    return {m.id: m for m in s.models}
 
 
-def models_map(settings: AppSettings | None = None) -> dict[str, str]:
-    return {slot.id: slot.model for slot in (settings or get_settings()).slots}
+def tiered_models(settings: AppSettings | None = None) -> list[PoolModel]:
+    return [m for m in (settings or get_settings()).models if m.in_routing]
 
 
-def providers_map(settings: AppSettings | None = None) -> dict[str, str]:
-    return {slot.id: slot.provider for slot in (settings or get_settings()).slots}
+def models_for_tier(tier: str, settings: AppSettings | None = None) -> list[PoolModel]:
+    tid = (tier or "").strip().lower()
+    return [m for m in tiered_models(settings) if m.tier == tid]
 
 
-def labels_map(settings: AppSettings | None = None) -> dict[str, str]:
-    return {slot.id: slot.label for slot in (settings or get_settings()).slots}
+def pick_model_for_tier(
+    tier: str,
+    available_ids: set[str] | None = None,
+    settings: AppSettings | None = None,
+) -> PoolModel | None:
+    """Лучшая (max rank) модель тира; available_ids — id записей пула."""
+    cands = models_for_tier(tier, settings)
+    if available_ids is not None:
+        cands = [m for m in cands if m.id in available_ids]
+    if not cands:
+        return None
+    return max(cands, key=lambda m: (int(m.rank or 0), m.id))
 
 
-def required_ids(settings: AppSettings | None = None) -> tuple[str, ...]:
-    return tuple(s.id for s in (settings or get_settings()).slots if s.required)
+def derived_tiers_map(settings: AppSettings | None = None) -> dict[str, str]:
+    """tier → имя модели (лучшая по rank) — для UI/compat."""
+    s = settings or get_settings()
+    out: dict[str, str] = {}
+    for tid in FIXED_TIER_IDS:
+        picked = pick_model_for_tier(tid, settings=s)
+        if picked:
+            out[tid] = picked.model
+    return out
 
 
-def optional_ids(settings: AppSettings | None = None) -> tuple[str, ...]:
-    return tuple(s.id for s in (settings or get_settings()).slots if s.optional)
+def derived_providers_map(settings: AppSettings | None = None) -> dict[str, str]:
+    s = settings or get_settings()
+    out: dict[str, str] = {}
+    for tid in FIXED_TIER_IDS:
+        picked = pick_model_for_tier(tid, settings=s)
+        if picked:
+            out[tid] = picked.provider
+    return out
+
+
+def tier_rank_map(settings: AppSettings | None = None) -> dict[str, int]:
+    """Тир → max rank среди моделей на тире (для floor/ceiling / TIER_RANK)."""
+    s = settings or get_settings()
+    out: dict[str, int] = {}
+    for tid in FIXED_TIER_IDS:
+        cands = models_for_tier(tid, s)
+        if cands:
+            out[tid] = max(int(m.rank or 0) for m in cands)
+        else:
+            # дефолтный rank семантики тира (даже без моделей)
+            out[tid] = next((r for t, _m, _l, r in _DEFAULT_POOL_SPEC if t == tid), 1)
+    return out
 
 
 def tier_order(settings: AppSettings | None = None) -> list[str]:
-    """Лестница эскалации: уникальные id по возрастанию rank (без дублей ранга — стабильный порядок)."""
-    slots = sorted((settings or get_settings()).slots, key=lambda s: (s.rank, s.id))
-    # coder — боковая ветка: в лестнице эскалации его нет (см. _next_tier)
-    order: list[str] = []
-    for s in slots:
-        if s.id == "coder":
-            continue
-        order.append(s.id)
+    ranks = tier_rank_map(settings)
+    order = sorted(
+        (t for t in FIXED_TIER_IDS if t != "coder"),
+        key=lambda t: (ranks.get(t, 1), t),
+    )
     return order
 
 
-def tier_rank(settings: AppSettings | None = None) -> dict[str, int]:
-    return {s.id: s.rank for s in (settings or get_settings()).slots}
-
-
-def router_auto_ids(settings: AppSettings | None = None) -> list[str]:
-    return [s.id for s in (settings or get_settings()).slots if s.router_auto]
+def router_auto_tier_ids(settings: AppSettings | None = None) -> list[str]:
+    """Уникальные тиры, у которых есть ≥1 модель в routing."""
+    seen: list[str] = []
+    for m in sorted(tiered_models(settings), key=lambda x: (int(x.rank or 0), x.id)):
+        assert m.tier
+        if m.tier not in seen:
+            seen.append(m.tier)
+    return seen
 
 
 def build_router_system(settings: AppSettings | None = None) -> str:
     s = settings or get_settings()
     lines = [ROUTER_SYSTEM_HEADER.rstrip(), ""]
-    for slot in sorted(s.slots, key=lambda x: (x.rank, x.id)):
-        auto = "auto" if slot.router_auto else "вручную/эскалация"
-        prov = "" if slot.provider == "ollama" else f", provider={slot.provider}"
+    for m in sorted(tiered_models(s), key=lambda x: (int(x.rank or 0), x.tier or "", x.id)):
+        prov = "" if m.provider == "ollama" else f", provider={m.provider}"
         lines.append(
-            f"- {slot.id} (модель `{slot.model}`{prov}, rank={slot.rank}, {auto}): "
-            f"{slot.router_prompt}"
+            f"- {m.tier} (модель `{m.model}`{prov}, rank={m.rank}, id={m.id}): "
+            f"{m.router_prompt}"
         )
+    if not tiered_models(s):
+        lines.append("- (нет моделей с тиром — назначьте tier в настройках пула)")
     lines.append(ROUTER_SYSTEM_FOOTER.rstrip())
     return "\n".join(lines) + "\n"
 
 
 def build_route_schema(settings: AppSettings | None = None) -> dict[str, Any]:
-    enums = router_auto_ids(settings) or ["tiny", "mid", "heavy"]
+    enums = router_auto_tier_ids(settings) or ["tiny", "mid", "heavy"]
     return {
         "type": "object",
         "properties": {
@@ -666,20 +666,16 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
     s = settings or get_settings()
     return {
         "router_model": s.router_model,
-        "slots": [slot.to_dict() for slot in s.slots],
+        "models": [m.to_dict() for m in s.models],
+        # compat для старого UI на один релиз
+        "slots": [m.to_dict() for m in s.models],
         "fixed_tiers": [
-            {
-                "id": d["id"],
-                "rank": d["rank"],
-                "label": d["label"],
-                "required": d["required"],
-                "optional": d["optional"],
-            }
-            for d in DEFAULT_SLOTS
+            {"id": tid, "rank": r, "label": lab}
+            for tid, _m, lab, r in _DEFAULT_POOL_SPEC
         ],
         "defaults": {
             "router_model": DEFAULT_ROUTER_MODEL,
-            "slots": DEFAULT_SLOTS,
+            "models": [m.to_dict() for m in _default_pool()],
             "router_prompts": DEFAULT_ROUTER_PROMPTS,
             "fixed_tiers": list(FIXED_TIER_IDS),
         },
@@ -687,8 +683,99 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
         "providers": {
             "openrouter": openrouter_status(),
         },
+        "tiers": derived_tiers_map(s),
     }
 
+
+def add_model(
+    *,
+    model: str,
+    label: str | None = None,
+    router_prompt: str | None = None,
+    tier: str | None = None,
+    rank: int | None = None,
+    provider: str = "ollama",
+    model_id: str | None = None,
+) -> AppSettings:
+    """Добавить модель в пул (или обновить по id)."""
+    s = get_settings()
+    model = (model or "").strip()
+    if not model:
+        raise ValueError("Укажите имя модели")
+    prov = _normalize_provider(provider)
+    tid: str | None
+    if tier is None or str(tier).strip() == "" or str(tier).strip().lower() in {
+        "none",
+        "null",
+        "-",
+        "manual",
+    }:
+        tid = None
+    else:
+        tid = str(tier).strip().lower()
+        if tid not in FIXED_TIERS:
+            raise ValueError(
+                f"Неизвестный tier: {tid}. Допустимы: {', '.join(FIXED_TIER_IDS)} или пусто"
+            )
+    used = {m.id for m in s.models}
+    pid = (model_id or "").strip() or make_pool_id(prov, model, used=used)
+    existing = next((m for m in s.models if m.id == pid), None)
+    raw = {
+        "id": pid,
+        "model": model,
+        "provider": prov,
+        "label": (label or "").strip()
+        or (model if prov == "ollama" else f"{model} · OR"),
+        "router_prompt": (router_prompt or "").strip()
+        or (existing.router_prompt if existing else ""),
+        "tier": tid,
+        "rank": rank if tid is not None else None,
+    }
+    entry = _pool_from_dict(raw)
+    if existing:
+        s.models = [entry if m.id == pid else m for m in s.models]
+    else:
+        s.models.append(entry)
+    return save_settings(s)
+
+
+def update_settings(
+    models_payload: list[dict[str, Any]],
+    *,
+    router_model: str | None = None,
+) -> AppSettings:
+    """Полная замена пула (+ опционально модель роутера)."""
+    if not isinstance(models_payload, list) or not models_payload:
+        raise ValueError("Нужен непустой список models")
+    for item in models_payload:
+        if not isinstance(item, dict):
+            raise ValueError("Каждая модель должна быть объектом")
+    current = get_settings()
+    rm = _normalize_router_model(
+        router_model if router_model is not None else current.router_model,
+        fallback=current.router_model or DEFAULT_ROUTER_MODEL,
+    )
+    used: set[str] = set()
+    models = [_pool_from_dict(x, used_ids=used) for x in models_payload]
+    return save_settings(AppSettings(models=models, router_model=rm))
+
+
+def delete_model(model_id: str) -> AppSettings:
+    """Убрать модель из пула."""
+    mid = (model_id or "").strip()
+    s = get_settings()
+    before = len(s.models)
+    s.models = [m for m in s.models if m.id != mid]
+    if len(s.models) == before:
+        raise KeyError(model_id)
+    if not s.models:
+        raise ValueError(
+            "Нельзя удалить последнюю модель — в пуле должна остаться хотя бы одна"
+        )
+    return save_settings(s)
+
+
+# --- Совместимость со старыми именами ---
 
 def add_slot(
     *,
@@ -701,137 +788,101 @@ def add_slot(
     router_auto: bool | None = None,
     provider: str = "ollama",
 ) -> AppSettings:
-    """Назначить модель на фиксированный тир (id = tier)."""
-    s = get_settings()
-    model = (model or "").strip()
-    if not model:
-        raise ValueError("Укажите имя модели")
-    tid = (tier or slot_id or "").strip().lower()
-    if not tid:
-        raise ValueError(
-            f"Укажите tier (один из: {', '.join(FIXED_TIER_IDS)})"
-        )
-    if tid not in FIXED_TIERS:
-        raise ValueError(
-            f"Неизвестный tier: {tid}. Допустимы: {', '.join(FIXED_TIER_IDS)}"
-        )
-    prov = _normalize_provider(provider, builtin=False)
-    slot = next((x for x in s.slots if x.id == tid), None)
-    if slot is None:
-        raise ValueError(f"Тир {tid} отсутствует в настройках")
-    if prov == "openrouter":
-        prompt_default = (
-            f"Внешняя модель OpenRouter `{model}` на тире {tid} — сложные задачи, "
-            f"когда локальных не хватает (опиши критерии точнее в настройках)."
-        )
-    else:
-        prompt_default = (
-            f"Используй модель {model} (тир {tid}) для задач, которые ей лучше подходят "
-            f"(опиши критерии точнее в настройках)."
-        )
-    prompt = (router_prompt or "").strip() or slot.router_prompt or prompt_default
-    label_default = model if prov == "ollama" else f"{model} · OR"
-    slot.model = model
-    slot.provider = prov
-    slot.label = (label or "").strip() or label_default
-    slot.router_prompt = prompt
-    if rank is not None:
-        slot.rank = int(rank)
-    if router_auto is not None:
-        slot.router_auto = bool(router_auto)
-    return save_settings(s)
-
-
-def update_settings(
-    slots_payload: list[dict[str, Any]],
-    *,
-    router_model: str | None = None,
-) -> AppSettings:
-    """Полная замена списка слотов (+ опционально модель роутера)."""
-    if not isinstance(slots_payload, list) or not slots_payload:
-        raise ValueError("Нужен непустой список slots")
-    for item in slots_payload:
-        if not isinstance(item, dict):
-            raise ValueError("Каждый slot должен быть объектом")
-        sid = str(item.get("id") or "").strip().lower()
-        if sid and sid not in FIXED_TIERS:
-            raise ValueError(
-                f"Неизвестный tier: {sid}. Допустимы: {', '.join(FIXED_TIER_IDS)}"
-            )
-    current = get_settings()
-    rm = _normalize_router_model(
-        router_model if router_model is not None else current.router_model,
-        fallback=current.router_model or DEFAULT_ROUTER_MODEL,
-    )
-    return save_settings(
-        AppSettings(
-            slots=[_slot_from_dict(x) for x in slots_payload],
-            router_model=rm,
-        )
+    """Совместимость: назначить/добавить модель (tier из tier или slot_id)."""
+    del router_auto
+    tid = tier if tier is not None else slot_id
+    return add_model(
+        model=model,
+        label=label,
+        router_prompt=router_prompt,
+        tier=tid,
+        rank=rank,
+        provider=provider,
     )
 
 
 def delete_slot(slot_id: str) -> AppSettings:
-    """Сбросить тир к defaults (модель/провайдер/промпт/rank)."""
-    sid = slot_id.strip().lower()
-    if sid not in FIXED_TIERS:
-        raise KeyError(slot_id)
-    default = next(d for d in DEFAULT_SLOTS if d["id"] == sid)
-    s = get_settings()
-    s.slots = [
-        _slot_from_dict(default) if x.id == sid else x for x in s.slots
-    ]
-    return save_settings(s)
+    """Совместимость: удалить по id записи пула (не по тиру)."""
+    return delete_model(slot_id)
+
+
+def models_map(settings: AppSettings | None = None) -> dict[str, str]:
+    return derived_tiers_map(settings)
+
+
+def providers_map(settings: AppSettings | None = None) -> dict[str, str]:
+    return derived_providers_map(settings)
+
+
+def labels_map(settings: AppSettings | None = None) -> dict[str, str]:
+    s = settings or get_settings()
+    out: dict[str, str] = {}
+    for tid in FIXED_TIER_IDS:
+        picked = pick_model_for_tier(tid, settings=s)
+        if picked:
+            out[tid] = picked.label
+    return out
+
+
+def required_ids(settings: AppSettings | None = None) -> tuple[str, ...]:
+    del settings
+    return ()
+
+
+def optional_ids(settings: AppSettings | None = None) -> tuple[str, ...]:
+    return tuple(FIXED_TIER_IDS)
+
+
+def tier_rank(settings: AppSettings | None = None) -> dict[str, int]:
+    return tier_rank_map(settings)
+
+
+def router_auto_ids(settings: AppSettings | None = None) -> list[str]:
+    return router_auto_tier_ids(settings)
+
+
+def slots_by_id(settings: AppSettings | None = None) -> dict[str, PoolModel]:
+    return models_by_id(settings)
 
 
 def apply_to_runtime(settings: AppSettings | None = None) -> None:
-    """Прописать MODELS / ранги / промпт роутера в orchestra и router."""
+    """Прописать пул / MODELS / ранги / промпт роутера в orchestra и router."""
     s = settings or get_settings()
     from . import orchestra
     from . import router
 
-    models = models_map(s)
-    providers = providers_map(s)
-    ranks = tier_rank(s)
+    pool = list(s.models)
+    models = derived_tiers_map(s)
+    providers = derived_providers_map(s)
+    ranks = tier_rank_map(s)
     order = tier_order(s)
-    required = required_ids(s)
-    optional = optional_ids(s) or tuple(models.keys())
-    # Selfcheck — только локальные модели (предпочтительно mid)
-    selfcheck = next(
-        (
-            models[tid]
-            for tid in ("mid", "large", "small", "heavy", "nano", "tiny")
-            if models.get(tid) and providers.get(tid, "ollama") == "ollama"
-        ),
-        next(
-            (
-                models[tid]
-                for tid in models
-                if providers.get(tid, "ollama") == "ollama" and models.get(tid)
-            ),
-            "",
-        ),
-    )
-    heavy_rank = ranks.get("heavy", 2)
+
+    # Selfcheck — локальная Ollama из пула (предпочтительно mid)
+    def _local_name(preferred_tiers: tuple[str, ...]) -> str:
+        for tid in preferred_tiers:
+            for m in models_for_tier(tid, s):
+                if m.provider == "ollama" and m.model:
+                    return m.model
+        for m in s.models:
+            if m.provider == "ollama" and m.model:
+                return m.model
+        return ""
+
+    selfcheck = _local_name(("mid", "large", "small", "heavy", "nano", "tiny"))
+    heavy_rank = ranks.get("heavy", 5)
     complex_tiers = frozenset(
-        tid for tid, r in ranks.items() if r >= heavy_rank or tid in {"heavy", "xlarge", "coder", "ultra", "frontier"}
+        tid
+        for tid, r in ranks.items()
+        if r >= heavy_rank or tid in {"heavy", "xlarge", "coder", "ultra", "frontier"}
     )
-    route_model = s.router_model or models.get("tiny") or router.ROUTE_MODEL
-    # REVALIDATE тоже локальный mid, иначе тот же route_model
-    revalidate = next(
-        (
-            models[tid]
-            for tid in ("mid", "large", "small", "heavy")
-            if models.get(tid) and providers.get(tid, "ollama") == "ollama"
-        ),
-        route_model,
-    )
+    route_model = s.router_model or _local_name(("tiny", "nano", "small", "mid")) or router.ROUTE_MODEL
+    revalidate = _local_name(("mid", "large", "small", "heavy")) or route_model
     system = build_router_system(s)
     schema = build_route_schema(s)
-    auto_tiers = frozenset(router_auto_ids(s))
+    auto_tiers = frozenset(router_auto_tier_ids(s))
 
     with runtime_lock:
-        # Без clear(): иначе параллельный handle() увидит пустой MODELS
+        orchestra.POOL = [m.to_dict() for m in pool]
         for key, val in models.items():
             orchestra.MODELS[key] = val
         for key in list(orchestra.MODELS):
@@ -842,8 +893,8 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
         for key in list(orchestra.PROVIDERS):
             if key not in providers:
                 del orchestra.PROVIDERS[key]
-        orchestra.REQUIRED_TIERS = required  # type: ignore[assignment]
-        orchestra.OPTIONAL_TIERS = optional  # type: ignore[assignment]
+        orchestra.REQUIRED_TIERS = ()
+        orchestra.OPTIONAL_TIERS = tuple(FIXED_TIER_IDS)
         orchestra.SELFCHECK_MODEL = selfcheck
         orchestra._COMPLEX_TIERS = complex_tiers  # type: ignore[attr-defined]
 
@@ -853,7 +904,7 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
             if key not in ranks:
                 del router.TIER_RANK[key]
         router.TIER_ORDER[:] = order
-        router.ALL_TIERS = frozenset(ranks)
+        router.ALL_TIERS = frozenset(FIXED_TIER_IDS)
         router.ROUTE_MODEL = route_model
         router.REVALIDATE_MODEL = revalidate
         router.SYSTEM = system

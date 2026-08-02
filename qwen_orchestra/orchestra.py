@@ -38,12 +38,42 @@ MODELS: dict[str, str] = {
     "frontier": "qwen2.5:14b",
 }
 
-# id слота → ollama | openrouter (синхронизируется apply_to_runtime)
+# id слота/тира → ollama | openrouter (derived; синхронизируется apply_to_runtime)
 PROVIDERS: dict[str, str] = {tid: "ollama" for tid in MODELS}
 
-# Совместимость со старым API (shim orchestra.py); логика health больше не делит required/optional
+# Снимок пула: list[dict] с полями id/model/provider/tier/rank/...
+POOL: list[dict[str, Any]] = []
+
 REQUIRED_TIERS: tuple[str, ...] = ()
 OPTIONAL_TIERS: tuple[str, ...] = ()
+
+
+def _entry_reachable(entry: dict[str, Any], have: set[str], *, or_ok: bool) -> bool:
+    name = (entry.get("model") or "").strip()
+    if not name:
+        return False
+    if (entry.get("provider") or "ollama") == "openrouter":
+        return or_ok
+    return name in have
+
+
+def available_pool_entries(
+    have: set[str] | None = None,
+    *,
+    pool: list[dict[str, Any]] | None = None,
+    routed_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Доступные записи пула (Ollama installed или OR + ключ)."""
+    have = have if have is not None else set(installed_models())
+    src = pool if pool is not None else POOL
+    or_ok = app_settings.openrouter_configured()
+    out: list[dict[str, Any]] = []
+    for e in src:
+        if routed_only and not (e.get("tier") or "").strip():
+            continue
+        if _entry_reachable(e, have, or_ok=or_ok):
+            out.append(e)
+    return out
 
 
 def available_tiers(
@@ -51,64 +81,49 @@ def available_tiers(
     *,
     models: dict[str, str] | None = None,
     providers: dict[str, str] | None = None,
+    pool: list[dict[str, Any]] | None = None,
 ) -> set[Tier]:
-    """Тиры с реально доступной моделью (Ollama установлена или OR + ключ + непустое имя)."""
-    have = have if have is not None else set(installed_models())
-    src_models = models if models is not None else MODELS
-    src_providers = providers if providers is not None else PROVIDERS
-    or_ok = app_settings.openrouter_configured()
-    result: set[Tier] = set()
-    for t, name in src_models.items():
-        name = (name or "").strip()
-        if not name:
-            continue
-        if src_providers.get(t, "ollama") == "openrouter":
-            if or_ok:
-                result.add(t)
-        elif name in have:
-            result.add(t)
-    return result
+    """Тиры с ≥1 доступной routed-моделью в пуле."""
+    del models, providers  # derived из пула
+    entries = available_pool_entries(have, pool=pool, routed_only=True)
+    return {str(e["tier"]) for e in entries if e.get("tier")}
 
 
-def _unavailable_slot_labels(
+def _unavailable_pool_labels(
     have: set[str],
     *,
-    models: dict[str, str] | None = None,
-    providers: dict[str, str] | None = None,
+    pool: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    src_models = models if models is not None else MODELS
-    src_providers = providers if providers is not None else PROVIDERS
+    src = pool if pool is not None else POOL
     or_ok = app_settings.openrouter_configured()
     out: list[str] = []
-    for t, name in src_models.items():
-        name = (name or "").strip()
+    for e in src:
+        name = (e.get("model") or "").strip()
         if not name:
-            out.append(f"{t}:(пусто)")
             continue
-        if src_providers.get(t, "ollama") == "openrouter":
-            if not or_ok:
-                out.append(f"openrouter:{name}")
+        if _entry_reachable(e, have, or_ok=or_ok):
             continue
-        if name not in have:
+        if (e.get("provider") or "ollama") == "openrouter":
+            out.append(f"openrouter:{name}")
+        else:
             out.append(name)
     return out
 
 
 def missing_models(have: set[str] | None = None) -> list[str]:
-    """Критичные пробелы: только если нет ни одного доступного тира."""
+    """Критичные пробелы: нет ни одной доступной модели пула."""
     have = have if have is not None else set(installed_models())
-    if available_tiers(have):
+    if available_pool_entries(have):
         return []
-    return _unavailable_slot_labels(have) or ["(нет доступных слотов)"]
+    return _unavailable_pool_labels(have) or ["(нет доступных моделей)"]
 
 
 def missing_optional_models(have: set[str] | None = None) -> list[str]:
-    """Недоступные слоты при том, что хотя бы один тир уже работает."""
+    """Назначенные, но недоступные модели при том, что пул частично работает."""
     have = have if have is not None else set(installed_models())
-    avail = available_tiers(have)
-    if not avail:
+    if not available_pool_entries(have):
         return []
-    return _unavailable_slot_labels(have)
+    return _unavailable_pool_labels(have)
 
 MAX_TOOL_ROUNDS = 4
 MAX_TOOL_CALLS = 8
@@ -206,6 +221,37 @@ def _provider_of(tier: str, providers: dict[str, str] | None = None) -> str:
     return src.get(tier, "ollama") or "ollama"
 
 
+def _pool_rank(entry: dict[str, Any]) -> int:
+    try:
+        return int(entry.get("rank") if entry.get("rank") is not None else -1)
+    except (TypeError, ValueError):
+        return -1
+
+
+def _pick_entry_for_tier(
+    tier: Tier,
+    available_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Среди available routed-моделей тира — max rank."""
+    cands = [
+        e
+        for e in available_entries
+        if (e.get("tier") or "").strip() == tier and (e.get("model") or "").strip()
+    ]
+    if not cands:
+        return None
+    return max(cands, key=lambda e: (_pool_rank(e), str(e.get("id") or "")))
+
+
+def _entry_by_id(
+    pool_id: str, pool: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    for e in pool:
+        if e.get("id") == pool_id:
+            return e
+    return None
+
+
 def _emit(on_status: StatusCallback | None, event: str, **payload: Any) -> None:
     if on_status:
         on_status(event, payload)
@@ -221,7 +267,7 @@ def _rank(tier: str) -> int:
 
 
 def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
-    """Подобрать установленную модель: тот же тир, иначе ближайший ниже/альтернатива."""
+    """Подобрать тир с моделями: тот же, иначе ближайший ниже/альтернатива."""
     if not available:
         raise RuntimeError("Нет установленных моделей оркестра")
     if tier in available:
@@ -230,7 +276,6 @@ def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
         return "xlarge"
     if tier == "xlarge" and "coder" in available:
         return "coder"
-    # вниз по лестнице размера
     for t in reversed(TIER_ORDER):
         if _rank(t) <= _rank(tier) and t in available:
             return t
@@ -240,67 +285,50 @@ def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
     return next(iter(available))
 
 
-def _escalate_sort_key(t: Tier) -> tuple[int, int, str]:
-    """Порядок эскалации: rank ↑, при равном rank — xlarge раньше coder."""
-    # coder — боковая ветка той же «весовой» полки; общий анализ → xlarge
-    coder_last = 1 if t == "coder" else 0
-    return (_rank(t), coder_last, t)
-
-
-def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
-    """Следующий установленный тир при эскалации (TIER_ORDER / rank; coder↔xlarge)."""
-    if available is None:
-        available = available_tiers()
-
-    if tier == "coder":
-        for cand in ("ultra", "frontier", "xlarge", "heavy", "mid"):
-            if cand in available and cand != tier:
-                return cand
+def _next_entry_by_rank(
+    current: dict[str, Any],
+    available_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Следующая routed-модель с rank строго выше текущей."""
+    cur_rank = _pool_rank(current)
+    routed = [
+        e
+        for e in available_entries
+        if (e.get("tier") or "").strip() and (e.get("model") or "").strip()
+    ]
+    stronger = [e for e in routed if _pool_rank(e) > cur_rank]
+    if not stronger:
         return None
-
-    if tier in TIER_ORDER:
-        idx = TIER_ORDER.index(tier)
-        for cand in TIER_ORDER[idx + 1 :]:
-            if cand in available:
-                return cand
-        # xlarge: боковая ветка coder того же rank, если выше по лестнице никого нет
-        if tier == "xlarge" and "coder" in available:
-            return "coder"
-
-    ranked = sorted(available, key=_escalate_sort_key)
-    for cand in ranked:
-        if _rank(cand) > _rank(tier):
-            return cand
-    return None
+    return min(stronger, key=lambda e: (_pool_rank(e), str(e.get("id") or "")))
 
 
-def _local_review_tier(
-    available: set[Tier],
+def _local_review_model(
+    available_entries: list[dict[str, Any]],
     *,
-    models: dict[str, str],
-    providers: dict[str, str],
     installed: set[str],
-    preferred: str = "mid",
-) -> Tier | None:
-    """Ближайший доступный Ollama-тир для selfcheck (OpenRouter не подходит)."""
-    local = {
-        t
-        for t in available
-        if providers.get(t, "ollama") == "ollama"
-        and (models.get(t) or "").strip() in installed
-    }
+    preferred_tier: str = "mid",
+    fallback: str = "",
+) -> str | None:
+    """Локальная Ollama-модель для selfcheck."""
+    local = [
+        e
+        for e in available_entries
+        if (e.get("provider") or "ollama") == "ollama"
+        and (e.get("model") or "").strip() in installed
+    ]
     if not local:
-        return None
-    try:
-        return _fit_tier(preferred, local)
-    except RuntimeError:
-        return None
+        return fallback if fallback in installed else None
+    preferred = [
+        e for e in local if (e.get("tier") or "") == preferred_tier
+    ]
+    pick_from = preferred or local
+    best = max(pick_from, key=lambda e: (_pool_rank(e), str(e.get("id") or "")))
+    return (best.get("model") or "").strip() or None
 
 
 def _escalated(start: Tier, final: Tier) -> bool:
     if _rank(final) > _rank(start):
         return True
-    # coder ↔ xlarge: смена специализации тоже эскалация
     return start != final and {start, final} <= {"coder", "xlarge"}
 
 
@@ -687,6 +715,7 @@ def handle(
     history: list[dict] | None = None,
     *,
     force_tier: Tier | None = None,
+    force_model: str | None = None,
     stream: bool = True,
     verbose: bool = True,
     on_token: TokenCallback | None = None,
@@ -694,7 +723,6 @@ def handle(
 ) -> OrchestraResult:
     history = history or []
     app_settings.ensure_bootstrapped()
-    # История не должна содержать текущий user — иначе вопрос уйдёт дважды
     if (
         history
         and history[-1].get("role") == "user"
@@ -707,49 +735,64 @@ def handle(
     if on_status is None and verbose:
         on_status = _cli_status_printer(verbose)
 
-    # Снимок слотов на весь запрос — hot-reload settings не ломает цикл попыток
     with app_settings.runtime_lock:
-        models = dict(MODELS)
-        providers = dict(PROVIDERS)
+        pool = [dict(e) for e in POOL]
         selfcheck_model = SELFCHECK_MODEL
-
-    def _model(tier: Tier) -> str:
-        return models.get(tier) or MODELS.get(tier, "")
-
-    def _prov(tier: Tier) -> str:
-        return _provider_of(tier, providers)
 
     ollama_exc: Exception | None = None
     try:
         installed = set(installed_models())
         ollama_ok = True
     except Exception as exc:  # noqa: BLE001
-        # Ollama молчит — ещё можно работать на OpenRouter-слотах
         installed = set()
         ollama_ok = False
         ollama_exc = exc
-    available = available_tiers(installed, models=models, providers=providers)
-    if not available:
+
+    available_all = available_pool_entries(installed, pool=pool, routed_only=False)
+    available_routed = available_pool_entries(installed, pool=pool, routed_only=True)
+    available = {str(e["tier"]) for e in available_routed if e.get("tier")}
+    if not available_all:
         if not ollama_ok and ollama_exc is not None:
             raise RuntimeError(f"Ollama недоступна: {ollama_exc}") from ollama_exc
         raise RuntimeError("Нет установленных моделей оркестра")
 
-    if force_tier:
-        if force_tier not in ALL_TIERS:
-            raise ValueError(f"Неизвестный tier: {force_tier}")
-        if force_tier not in available:
-            name = _model(force_tier)
-            if _prov(force_tier) == "openrouter":
+    forced_entry: dict[str, Any] | None = None
+    decision: RouteDecision
+
+    if force_model:
+        entry = _entry_by_id(force_model, pool)
+        if entry is None:
+            raise ValueError(f"Модель пула не найдена: {force_model}")
+        if not _entry_reachable(
+            entry, installed, or_ok=app_settings.openrouter_configured()
+        ):
+            name = (entry.get("model") or "").strip()
+            if (entry.get("provider") or "ollama") == "openrouter":
                 raise ValueError(
-                    f"OpenRouter-слот «{force_tier}» недоступен "
-                    f"(модель `{name}`). Задайте API-ключ в настройках "
+                    f"OpenRouter-модель `{name}` недоступна. Задайте API-ключ "
                     f"или {app_settings.OPENROUTER_API_KEY_ENV}."
                 )
             raise ValueError(
-                f"Модель {name} не установлена. "
-                f"Установите: ollama pull {name}"
+                f"Модель {name} не установлена. Установите: ollama pull {name}"
             )
-        # Ручной тир — без LLM-роутера
+        forced_entry = entry
+        tier_for_force: Tier = str(entry.get("tier") or "mid")
+        decision = RouteDecision(
+            ok=True,
+            tier=tier_for_force,
+            need_web=need_web(user_text),
+            reason=f"forced_model:{force_model}",
+            reply="",
+        )
+    elif force_tier:
+        if force_tier not in ALL_TIERS:
+            raise ValueError(f"Неизвестный tier: {force_tier}")
+        if force_tier not in available:
+            raise ValueError(
+                f"Тир «{force_tier}» без доступных моделей в пуле. "
+                f"Назначьте модель с этим тиром или выберите другую."
+            )
+        forced_entry = _pick_entry_for_tier(force_tier, available_routed)
         decision = RouteDecision(
             ok=True,
             tier=force_tier,
@@ -758,6 +801,12 @@ def handle(
             reply="",
         )
     else:
+        if not available:
+            # Есть только модели без тира — Auto невозможен
+            raise RuntimeError(
+                "Нет моделей с тиром для Auto. Назначьте tier в пуле "
+                "или выберите модель вручную."
+            )
         decision = route(user_text)
         if decision.ok:
             fitted = _fit_tier(decision.tier, available)
@@ -770,6 +819,32 @@ def handle(
                     decision.reply if fitted == "tiny" else "",
                 )
 
+    def _resolve_entry(tier: Tier) -> dict[str, Any]:
+        if forced_entry is not None and (
+            force_model
+            or (forced_entry.get("tier") or "") == tier
+        ):
+            # force_model: всегда эта запись; force_tier: пока не эскалировали
+            if force_model:
+                return forced_entry
+        picked = _pick_entry_for_tier(tier, available_routed)
+        if picked:
+            return picked
+        # fallback: любая available
+        if available_routed:
+            return max(
+                available_routed,
+                key=lambda e: (_pool_rank(e), str(e.get("id") or "")),
+            )
+        return available_all[0]
+
+    start_entry = (
+        forced_entry
+        if force_model and forced_entry is not None
+        else _resolve_entry(decision.tier)
+    )
+    start_model_name = (start_entry.get("model") or "").strip()
+
     _emit(
         on_status,
         "route",
@@ -777,7 +852,8 @@ def handle(
         tier=decision.tier,
         need_web=decision.need_web,
         reason=decision.reason,
-        model=_model(decision.tier) or _model("tiny"),
+        model=start_model_name,
+        pool_id=start_entry.get("id"),
     )
 
     if not decision.ok:
@@ -785,11 +861,12 @@ def handle(
         _emit_token(on_token, text)
         if stream and verbose:
             print()
-        fb = _fit_tier("tiny", available)
+        fb = _fit_tier("tiny", available) if available else decision.tier
+        fb_entry = _resolve_entry(fb)
         return OrchestraResult(
             text=text,
             tier=fb,
-            model=_model(fb),
+            model=(fb_entry.get("model") or "").strip(),
             need_web=False,
             route_reason=decision.reason,
             checked=False,
@@ -798,19 +875,24 @@ def handle(
     start_tier: Tier = decision.tier
     attempts: list[_Attempt] = []
     retry_hint: str | None = None
+    # После эскалации force_model больше не держим
+    lock_forced = bool(force_model)
 
-    # Короткий ответ роутера — тоже под проверкой; не прошёл → идём к воркеру
-    if decision.tier == "tiny" and decision.reply:
+    if decision.tier == "tiny" and decision.reply and not force_model:
+        tiny_entry = _resolve_entry("tiny")
+        tiny_name = (tiny_entry.get("model") or "").strip()
         verdict = selfcheck.check(
             user_text, decision.reply, model=None, expect_detail=False, use_llm=False
         )
-        tiny_ctx = ContextPlan(history=[], num_ctx=NUM_CTX_MIN, use_history=False, reason="tiny-reply")
+        tiny_ctx = ContextPlan(
+            history=[], num_ctx=NUM_CTX_MIN, use_history=False, reason="tiny-reply"
+        )
         attempts.append(
             _Attempt(
                 text=decision.reply,
                 verdict=verdict,
                 tier="tiny",
-                model=_model("tiny"),
+                model=tiny_name,
                 ctx=tiny_ctx,
             )
         )
@@ -821,7 +903,7 @@ def handle(
             problems=verdict.problems,
             note=verdict.note,
             attempt=1,
-            model=_model("tiny"),
+            model=tiny_name,
             checked=verdict.checked,
         )
         if verdict.ok:
@@ -831,7 +913,7 @@ def handle(
             return OrchestraResult(
                 text=decision.reply,
                 tier="tiny",
-                model=_model("tiny"),
+                model=tiny_name,
                 need_web=False,
                 route_reason=decision.reason,
                 attempts=1,
@@ -839,31 +921,37 @@ def handle(
                 problems=list(verdict.problems),
             )
         mid = _fit_tier("mid", available)
+        mid_entry = _resolve_entry(mid)
         _emit(
             on_status,
             "retry",
             attempt=2,
             problems=verdict.problems,
-            from_model=_model("tiny"),
-            to_model=_model(mid),
+            from_model=tiny_name,
+            to_model=(mid_entry.get("model") or "").strip(),
         )
         retry_hint = verdict.hint
         decision = RouteDecision(
             True, mid, decision.need_web, decision.reason + " +recheck", ""
         )
+        lock_forced = False
 
-    tier: Tier = decision.tier
+    current_entry = (
+        forced_entry
+        if lock_forced and forced_entry is not None
+        else _resolve_entry(decision.tier)
+    )
+    tier: Tier = str(current_entry.get("tier") or decision.tier)
     tool_cache: dict[str, str] = {}
     ctx_plan = plan_worker_context(user_text, history, tier)
     _emit_context(on_status, ctx_plan, tier)
-    # Уже потраченная tiny-попытка учитывается в нумерации и лимите
     attempt_base = len(attempts)
 
     for attempt in range(1, MAX_ATTEMPTS + 1 - attempt_base):
-        model = _model(tier)
-        provider = _prov(tier)
+        model = (current_entry.get("model") or "").strip()
+        provider = (current_entry.get("provider") or "ollama").strip() or "ollama"
+        tier = str(current_entry.get("tier") or tier)
         attempt_no = attempt_base + attempt
-        # При эскалации на сложный тир пересчитываем ctx (tiny/mid → xlarge)
         if attempt > 1:
             ctx_plan = plan_worker_context(user_text, history, tier)
             _emit_context(on_status, ctx_plan, tier)
@@ -874,12 +962,12 @@ def handle(
             provider=provider,
             need_web=decision.need_web,
             tier=tier,
+            pool_id=current_entry.get("id"),
             attempt=attempt_no,
             num_ctx=ctx_plan.num_ctx,
             used_history=ctx_plan.use_history,
         )
 
-        # Web-tools только на Ollama; OpenRouter — plain (MVP)
         use_tools = decision.need_web and provider == "ollama"
         if use_tools:
             text = _worker_with_tools(
@@ -906,19 +994,12 @@ def handle(
                 provider=provider,
             )
 
-        # LLM-ревью только на локальной модели (ближайший к mid)
-        review_tier = _local_review_tier(
-            available,
-            models=models,
-            providers=providers,
+        review_model = _local_review_model(
+            available_all,
             installed=installed,
-            preferred="mid",
+            preferred_tier="mid",
+            fallback=selfcheck_model,
         )
-        review_model: str | None = None
-        if review_tier:
-            review_model = _model(review_tier)
-        elif selfcheck_model in installed:
-            review_model = selfcheck_model
         verdict = selfcheck.check(
             user_text,
             text,
@@ -943,8 +1024,9 @@ def handle(
         if verdict.ok or attempt_no >= MAX_ATTEMPTS:
             break
 
-        next_tier = _next_tier(tier, available)
-        if next_tier is None or next_tier == tier:
+        # force_model без тира — эскалировать некуда по rank-лестнице routed
+        next_entry = _next_entry_by_rank(current_entry, available_routed)
+        if next_entry is None:
             break
 
         _emit(
@@ -954,14 +1036,14 @@ def handle(
             problems=verdict.problems,
             reason=verdict.summary(),
             from_model=model,
-            to_model=_model(next_tier),
+            to_model=(next_entry.get("model") or "").strip(),
         )
         retry_hint = verdict.hint
-        tier = next_tier
+        current_entry = next_entry
+        lock_forced = False
 
     best = _best_attempt(attempts)
     if best is not attempts[-1]:
-        # показанный текст хуже более раннего — возвращаем лучший
         _emit(on_status, "restore", model=best.model, tier=best.tier)
         _emit_token(on_token, best.text)
 
@@ -974,7 +1056,8 @@ def handle(
         model=best.model,
         need_web=decision.need_web,
         route_reason=decision.reason,
-        escalated=_escalated(start_tier, best.tier),
+        escalated=_escalated(start_tier, best.tier)
+        or (best.model != start_model_name and len(attempts) > 1),
         attempts=len(attempts),
         checked=best.verdict.checked,
         problems=list(best.verdict.problems),

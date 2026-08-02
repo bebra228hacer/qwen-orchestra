@@ -125,48 +125,33 @@
       <div class="models-help" id="models-help" hidden>
         <h3>Как пользоваться</h3>
         <p>
-          Здесь настраивается список нейронок оркестра и правила Auto:
-          какая модель отвечает на запрос. Сначала выберите
-          <strong>модель роутера</strong> — она решает, какой слот взять,
-          когда срабатывает LLM-роутинг (неоднозначные короткие запросы
-          и ваши кастомные auto-слоты).
+          Здесь настраивается <strong>пул моделей</strong> оркестра и правила Auto.
+          Сначала выберите <strong>модель роутера</strong> — она решает, какой тир взять
+          при неоднозначных запросах.
         </p>
-        <h3>Слоты</h3>
+        <h3>Пул</h3>
         <ul>
-          <li><strong>Тир</strong> — выпадающий список на карточке: можно переназначить модель на другой из 10 уровней (карточки меняются местами). В чате выбирается тир.</li>
-          <li><strong>Удалить</strong> — сброс тира к модели по умолчанию (все 10 тиров равноправны).</li>
-          <li><strong>Модель</strong> — тег Ollama или id модели OpenRouter на этом тире.</li>
-          <li><strong>Подпись</strong> — как тир выглядит в селекторе Tier.</li>
-          <li><strong>Промпт</strong> — текст для роутера: <em>когда выбирать этот тир</em>. Пишите конкретно: типы задач, ключевые слова, чего избегать.</li>
-          <li><strong>Участвует в Auto</strong> — роутер может выбрать тир сам. Иначе только вручную или через эскалацию.</li>
+          <li><strong>Модель</strong> — тег Ollama или id OpenRouter; карточка = одна модель.</li>
+          <li><strong>Тир</strong> — tiny…frontier для Auto/эскалации, либо «не участвует в роутинге» (только ручной выбор в чате).</li>
+          <li><strong>Rank</strong> — сила при выборе на тире и эскалации после selfcheck (больше = сильнее). Без тира не используется.</li>
+          <li><strong>Промпт</strong> — когда роутеру выбирать этот тир (учитывается только у моделей с тиром).</li>
+          <li><strong>Удалить</strong> — убрать модель из пула (последнюю удалить нельзя).</li>
         </ul>
         <h3>OpenRouter</h3>
         <p>
-          Можно назначить внешнюю модель (Claude, GPT и т.д.) на любой тир
-          (часто <code>frontier</code>). Задайте API-ключ (или env <code>OPENROUTER_API_KEY</code>),
-          укажите id вида <code>anthropic/claude-sonnet-4</code>, rank и промпт.
+          Внешняя модель (Claude, GPT и т.д.): задайте API-ключ, id вида
+          <code>anthropic/claude-sonnet-4</code>, тир/rank по желанию.
           Роутер и самопроверка остаются локальными; web-tools на OpenRouter пока не работают.
         </p>
         <h3>Rank</h3>
         <p>
-          Число «силы» тира для эскалации после самопроверки (чем больше — тем сильнее).
-          Ориентир: tiny=0, nano=1, small=2, mid=3, large=4, heavy=5,
-          xlarge/coder=6, ultra=7, frontier=8.
-          При провале ответа оркестр поднимается на тир с большим rank.
-          Одинаковый rank — порядок по id; coder — отдельная ветка для кода.
+          При провале ответа оркестр переходит к следующей available-модели с большим rank.
+          Несколько моделей могут делить один тир — для ответа берётся с max rank.
         </p>
-        <h3>Назначить модель на тир</h3>
+        <h3>Добавить в пул</h3>
         <p>
-          Выберите тир в списке, затем модель Ollama или OpenRouter.
-          Так заполняется слот тира (произвольные id вроде <code>dsflash</code> больше не создаются).
-          «Удалить» на карточке сбрасывает тир к модели по умолчанию.
-        </p>
-        <h3>Сохранение</h3>
-        <p>
-          «Сохранить» пишет <code>settings.json</code> и сразу применяет настройки.
-          Ключ OpenRouter хранится в <code>secrets.json</code> (не в settings).
-          «Сбросить по умолчанию» возвращает стандартные слоты, промпты и роутер tiny
-          (ключ OpenRouter не трогает).
+          Выберите провайдер и модель; тир опционален. «Сохранить» пишет
+          <code>settings.json</code>. Ключ OpenRouter — в <code>secrets.json</code>.
         </p>
       </div>
       <div class="or-key-row" id="openrouter-key-row">
@@ -187,12 +172,12 @@
         </div>
       </div>
       <p class="modal-hint">
-        10 фиксированных тиров: на карточке можно сменить тир и провайдер.
-        «Удалить» сбрасывает тир к default. Health ok, если доступна хотя бы одна модель.
+        Пул моделей: укажите тир для Auto или оставьте «не участвует в роутинге».
+        Несколько моделей на один тир допустимы (приоритет — rank).
       </p>
       <div class="modal-body" id="models-list"></div>
       <div class="add-slot-form" id="add-slot-form">
-        <div class="field-label">Назначить модель на тир</div>
+        <div class="field-label">Добавить модель в пул</div>
         <div class="provider-toggle" id="add-provider-toggle" role="group" aria-label="Провайдер">
           <label class="provider-opt"><input type="radio" name="add-provider" value="ollama" checked /> Ollama</label>
           <label class="provider-opt"><input type="radio" name="add-provider" value="openrouter" /> OpenRouter</label>
@@ -200,23 +185,21 @@
         <div class="add-slot-row">
           <div class="field-with-label tier-field">
             <label class="field-label" for="add-slot-tier">Тир</label>
-            <select id="add-slot-tier" class="tier-select" title="К какому тиру относится модель"></select>
+            <select id="add-slot-tier" class="tier-select" title="Тир для Auto или без роутинга"></select>
           </div>
           <select id="add-slot-model" class="tier-select" title="Модель из Ollama"></select>
           <input id="add-slot-model-or" class="text-input" type="text" placeholder="anthropic/claude-sonnet-4" title="ID модели OpenRouter" hidden />
           <div class="field-with-label rank-field">
             <label class="field-label" for="add-slot-rank">Rank</label>
-            <input id="add-slot-rank" class="text-input rank-input" type="number" value="2" min="0" max="9" title="Сила / порядок эскалации" />
+            <input id="add-slot-rank" class="text-input rank-input" type="number" value="3" min="0" max="9" title="Сила / порядок эскалации" />
           </div>
         </div>
-        <input id="add-slot-label" class="text-input" type="text" placeholder="Подпись в списке" />
-        <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Когда роутеру выбирать этот тир…"></textarea>
-        <label class="check-label"><input type="checkbox" id="add-slot-auto" checked /> Участвует в Auto-роутере</label>
+        <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Промпт для роутера (когда выбирать)…"></textarea>
       </div>
       <footer class="modal-footer">
         <button type="button" class="btn btn-ghost" id="btn-models-reset">Сбросить по умолчанию</button>
         <div class="modal-footer-right">
-          <button type="button" class="btn btn-primary" id="btn-models-add">Назначить на тир</button>
+          <button type="button" class="btn btn-primary" id="btn-models-add">Добавить в пул</button>
           <button type="button" class="btn btn-send" id="btn-models-save">Сохранить</button>
         </div>
       </footer>

@@ -291,7 +291,7 @@ def _has_extra_auto() -> bool:
 
 
 def _resolve_local_router_model(*preferred: str) -> str | None:
-    """Первая установленная Ollama-модель из preferred, иначе любой локальный слот."""
+    """Первая установленная Ollama-модель из preferred, иначе любая локальная из пула."""
     from . import orchestra
     from .llm import installed_models
 
@@ -302,6 +302,18 @@ def _resolve_local_router_model(*preferred: str) -> str | None:
     for name in preferred:
         if name and name in have:
             return name
+    pool = getattr(orchestra, "POOL", None) or []
+    ranked = sorted(
+        (
+            e
+            for e in pool
+            if (e.get("provider") or "ollama") == "ollama"
+            and (e.get("model") or "").strip() in have
+        ),
+        key=lambda e: (int(e.get("rank") or 0), str(e.get("id") or "")),
+    )
+    if ranked:
+        return (ranked[0].get("model") or "").strip() or None
     for tid in sorted(orchestra.MODELS.keys(), key=lambda t: (_rank(t), t)):
         if orchestra.PROVIDERS.get(tid, "ollama") != "ollama":
             continue

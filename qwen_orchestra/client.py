@@ -88,7 +88,8 @@ class Client:
             "router_model": cfg.router_model,
             "router_missing": router_missing,
             "tiers": dict(MODELS),
-            "slots": [s.to_dict() for s in cfg.slots],
+            "pool": [m.to_dict() for m in cfg.models],
+            "slots": [m.to_dict() for m in cfg.models],
             "providers": {"openrouter": app_settings.openrouter_status()},
             "error": error,
         }
@@ -103,6 +104,7 @@ class Client:
         history: list[dict] | None = None,
         *,
         force_tier: Tier | None = None,
+        force_model: str | None = None,
         stream: bool = True,
         on_token: TokenCallback | None = None,
         on_status: StatusCallback | None = None,
@@ -112,6 +114,7 @@ class Client:
             user_text,
             history,
             force_tier=force_tier,
+            force_model=force_model,
             stream=stream,
             verbose=False,
             on_token=on_token,
@@ -124,48 +127,61 @@ class Client:
 
     def update_settings(
         self,
-        slots: list[dict[str, Any]],
+        models: list[dict[str, Any]] | None = None,
         *,
+        slots: list[dict[str, Any]] | None = None,
         router_model: str | None = None,
     ) -> dict[str, Any]:
         app_settings.ensure_bootstrapped()
-        app_settings.update_settings(slots, router_model=router_model)
+        payload = models if models is not None else slots
+        if payload is None:
+            raise ValueError("Нужен список models")
+        app_settings.update_settings(payload, router_model=router_model)
         return app_settings.public_settings_payload()
 
     def reset_settings(self) -> dict[str, Any]:
         app_settings.reset_settings()
         return app_settings.public_settings_payload()
 
-    def add_slot(
+    def add_model(
         self,
         *,
         model: str,
         label: str | None = None,
         router_prompt: str | None = None,
-        slot_id: str | None = None,
+        model_id: str | None = None,
         tier: str | None = None,
         rank: int | None = None,
-        router_auto: bool | None = None,
         provider: str = "ollama",
     ) -> dict[str, Any]:
-        """Назначить модель на фиксированный тир (`tier` или устаревший `slot_id`)."""
+        """Добавить или обновить модель в пуле."""
         app_settings.ensure_bootstrapped()
-        app_settings.add_slot(
+        app_settings.add_model(
             model=model,
             label=label,
             router_prompt=router_prompt,
-            slot_id=slot_id,
+            model_id=model_id,
             tier=tier,
             rank=rank,
-            router_auto=router_auto,
             provider=provider,
         )
         return app_settings.public_settings_payload()
 
-    def delete_slot(self, slot_id: str) -> dict[str, Any]:
+    def add_slot(self, **kwargs: Any) -> dict[str, Any]:
+        """Совместимость: см. add_model."""
+        if "slot_id" in kwargs and "model_id" not in kwargs:
+            kwargs["model_id"] = kwargs.pop("slot_id")
+        kwargs.pop("router_auto", None)
+        return self.add_model(**kwargs)
+
+    def delete_model(self, model_id: str) -> dict[str, Any]:
+        """Убрать модель из пула."""
         app_settings.ensure_bootstrapped()
-        app_settings.delete_slot(slot_id)
+        app_settings.delete_model(model_id)
         return app_settings.public_settings_payload()
+
+    def delete_slot(self, slot_id: str) -> dict[str, Any]:
+        return self.delete_model(slot_id)
 
     def set_openrouter_api_key(self, api_key: str | None) -> dict[str, Any]:
         """Сохранить или очистить (None) ключ OpenRouter в secrets.json."""
