@@ -1,206 +1,69 @@
 # Qwen Orchestra
 
-Локальный оркестр моделей **Qwen3.5** (+ Qwen2.5 14b) поверх [Ollama](https://ollama.com): роутинг tiny → mid → heavy → xlarge (+ coder), адаптивный `num_ctx`, самопроверка ответов и веб-чат в стиле Cursor (только `127.0.0.1`, без аккаунтов).
+Локальный оркестр LLM поверх [Ollama](https://ollama.com): несколько моделей Qwen работают как одна система — роутер выбирает тир, воркер отвечает, selfcheck переделывает слабый ответ на модели сильнее. Веб-чат в стиле Cursor Chat (тёмная тема, один пользователь, только `127.0.0.1`).
 
-| Tier | Модель | Роль |
-|------|--------|------|
-| tiny | `qwen3.5:0.8b` | Роутер, приветствия, простая арифметика |
-| mid | `qwen3.5:4b` | Обычные задачи, код, объяснения; ревью ответов |
-| heavy | `qwen3.5:9b` | Сложные задачи; эскалация после selfcheck |
-| xlarge | `qwen2.5:14b` | Верх эскалации (опционально, ~9 ГБ) |
-| coder | `qwen2.5-coder:14b` | Тяжёлый код и отладка (опционально, ~9 ГБ) |
-
-Большинство mid/heavy/web/coder запросов роутятся **без** вызова tiny (детерминированные правила). Ручной тир в UI тоже не дергает роутер. Эскалация не падает на неустановленный 14b. У Qwen3.5 thinking **выключен** (`think: false`) — иначе ломаются JSON-роутер и tools.
-
-Слоты моделей и **промпты роутера** («когда какую модель выбирать») настраиваются в UI: кнопка **«Модели и промпты»** в сайдбаре (справка по **?**). Можно выбрать **модель роутера**, сменить Ollama-имя у слотов, отредактировать тексты для Auto и **добавить свою нейронку** (Ollama или **OpenRouter**). Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json`. Defaults и файл `settings.json` — модуль `settings.py`.
-
-Поток одного запроса:
-
-```
-user → route → plan context (история + num_ctx) → worker (± web)
-                 ↑                                        │ selfcheck не ok
-                 └──────── retry на тир выше ─────────────┘  (до 3 попыток)
-```
-
-Для AI-агентов: [AGENTS.md](AGENTS.md).
+**Не** облачный бот и **не** IDE: чат/composer текста к оркестру.
 
 ---
 
-## Требования
+## Возможности
 
-- Windows 10/11 (лаунчер и `start.bat` рассчитаны на Windows)
-- [Python 3.10+](https://www.python.org/downloads/) в `PATH`
-- [Ollama](https://ollama.com/download) (лаунчер сам поднимет `ollama serve`, если сервис не запущен)
-- Для 14b желательно ≥8 ГБ VRAM (на 8 ГБ возможен CPU/GPU hybrid и ниже скорость)
+- **Авто-роутинг** по слотам: tiny → mid → heavy → xlarge (+ coder для тяжёлого кода). Ручной выбор тира в UI/CLI.
+- **Детерминированный floor/ceiling** — tiny не «занижает» сложность; «кратко» держит потолок mid.
+- **Самопроверка ответа** (правила + LLM-ревью) и **retry с эскалацией** до нескольких попыток.
+- **Адаптивный `num_ctx`** — минимальное окно под запрос, история для тяжёлых тиров только по отсылкам.
+- **Web-tools** — поиск и чтение URL (кэш между retry, лимиты вызовов).
+- **Веб-UI** — чаты, Markdown/код/формулы, чипы статуса, «Модели и промпты», монитор CPU/RAM/GPU/Ollama.
+- **OpenRouter-слоты** — внешние модели рядом с локальными (ключ в env / `secrets.json`); tools пока только на Ollama.
+- **Python SDK** — `from qwen_orchestra import Client` (ask / route / health / settings in-process).
+- **CLI** — интерактивный оркестр и one-shot; лаунчер с автозапуском Ollama при необходимости.
 
-### Python (бэкенд / SDK)
+Defaults: `qwen3.5:0.8b` · `4b` · `9b` · `qwen2.5:14b` · `qwen2.5-coder:14b` (14b опциональны).
 
-```powershell
-python -m pip install -e ".[web]"
-# или только ядро оркестра без веб-сервера:
-# python -m pip install -e .
 ```
-
-Пакет `qwen-orchestra`: ядро — `ddgs`, `psutil`; extra `[web]` — `fastapi`, `uvicorn`, `pydantic`.
-Альтернатива: `pip install -r requirements.txt` (всё сразу, как раньше).
-
-### SDK для других приложений
-
-```python
-from qwen_orchestra import Client
-
-client = Client()  # ollama_host=..., settings_path=...
-print(client.health())
-print(client.route("напиши функцию сортировки"))
-result = client.ask("2+2")
-print(result.text, result.tier, result.model)
-```
-
-Пример: `examples/ask_sdk.py`.
-
-### Фронтенд-библиотеки (уже в репозитории)
-
-Веб-чат **не** требует `npm` / CDN: минифицированные файлы лежат в `web/vendor/` и отдаются как статика (`/static/vendor/…`).
-
-| Файл | Библиотека | Зачем |
-|------|------------|--------|
-| `web/vendor/marked.min.js` | [marked](https://github.com/markedjs/marked) v15 | Markdown → HTML (GFM) |
-| `web/vendor/purify.min.js` | [DOMPurify](https://github.com/cure53/DOMPurify) v3 | Санитизация HTML (XSS) |
-| `web/vendor/highlight.min.js` | [highlight.js](https://github.com/highlightjs/highlight.js) v11 | Подсветка синтаксиса в блоках кода |
-| `web/vendor/highlight-github-dark.min.css` | hljs theme **GitHub Dark** | Цвета токенов под тёмный UI |
-| `web/vendor/katex/` | [KaTeX](https://katex.org/) 0.16 | Формулы `$…$` / `$$…$$` (css, js, auto-render, fonts) |
-
-Подключаются из `web/index.html`. Обновлять версии — скачать те же артефакты с jsDelivr / CDN release и заменить файлы в `web/vendor/`.
-
----
-
-## Развёртывание
-
-### 1. Клонировать репозиторий
-
-```powershell
-git clone https://github.com/bebra228hacer/qwen-orchestra.git
-cd qwen-orchestra
-```
-
-### 2. Установить зависимости Python
-
-```powershell
-python -m pip install -e ".[web]"
-# или: python -m pip install -r requirements.txt
-```
-
-### 3. Скачать модели Ollama
-
-```powershell
-ollama pull qwen3.5:0.8b
-ollama pull qwen3.5:4b
-ollama pull qwen3.5:9b
-# опционально (xlarge / coder) — лучше по одной, не параллельно:
-ollama pull qwen2.5:14b
-ollama pull qwen2.5-coder:14b
-```
-
-Проверка: `ollama list`. Иконка Ollama в трее — сервис на `http://localhost:11434`.  
-Теги 14b по умолчанию **Q4_K_M** (~9 ГБ каждая). `qwen3.5:9b` ≈ 6.6 ГБ.
-
-### 4. Запустить веб-чат
-
-```powershell
-python server.py
-```
-
-Откройте: **http://127.0.0.1:8787**
-
-Либо лаунчер:
-
-```powershell
-python open_web.py
-# или QwenChat.bat / QwenChat.exe
-```
-
-Сборка exe:
-
-```powershell
-pip install pyinstaller
-pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workpath build\qwenchat --specpath build\qwenchat open_web.py
-```
-
-Меню режимов: `start.bat`.
-
----
-
-## Использование
-
-### Веб-UI
-
-- Слева — чаты (очистка/удаление у каждого пункта), снизу — Composer
-- Ответы и сообщения рендерятся как **Markdown** (GFM: код, списки, таблицы; `marked` + `DOMPurify` + `highlight.js`) и **LaTeX-формулы** (`KaTeX`, `$…$` / `$$…$$`) из `web/vendor/`
-- Селектор **Auto / tiny / mid / heavy / xlarge / coder**
-- Чипы: tier, модель, `ctx N`, `история` / `без истории`, `проверено`, `попыток: N`
-- Health: обязательные модели отдельно; 14b — «опционально», если не скачаны
-
-Чаты в памяти процесса (сбрасываются при рестарте сервера).
-
-### CLI оркестр
-
-```powershell
-python orchestra_chat.py
-```
-
-Команды: `/tier <id>`, `/tiers`, `/auto`, `/clear`, `/exit`.
-
-```powershell
-python ask_orchestra.py "Привет!"
-python ask_orchestra.py "Какая погода в Москве?"
-```
-
-### Без оркестра
-
-```powershell
-python chat.py          # только mid (qwen3.5:4b)
-python chat_web.py      # mid + интернет
+user → route → plan context → worker (± web) → selfcheck
+                 ↑                                    │ не ok
+                 └──────── retry на тир выше ─────────┘
 ```
 
 ---
 
-## Auto-режим (кратко)
+## Стек
 
-| Запрос | Минимум |
-|--------|---------|
-| приветствие, `2+2` | tiny |
-| объяснения, перевод, простой код, web | mid |
-| сравнение, архитектура, длинный анализ, план | heavy |
-| сервис/API, рефакторинг, тесты кода, traceback | coder |
-
-«Кратко» → потолок mid. Эскалация: tiny → mid → heavy → xlarge (`coder` → xlarge).  
-Полная таблица — в [AGENTS.md](AGENTS.md).
-
-### Контекст (`num_ctx`)
-
-Перед воркером считается минимальное окно под запрос (приоритет — не обрезать текст; затем экономия VRAM):
-
-```
-num_ctx = ceil_256(tokens(промпт) + 128 + reserve_ответа + safety) ∈ [256…8192]
-```
-
-- история чата для heavy/xlarge/coder — только если нужна («исправь это», follow-up…);
-- запас на ответ: 512 / 768 / 1536 (короткий / обычный / код).
-
----
-
-## Структура
-
-| Путь | Назначение |
+| Слой | Технологии |
 |------|------------|
-| `qwen_orchestra/` | **Python SDK**: `Client`, orchestra, router, selfcheck, llm, settings, metrics |
-| `qwen_orchestra/client.py` | Публичный фасад для встраивания в другие приложения |
-| `orchestra.py` и др. | Shim-модули (совместимость со старыми импортами) |
-| `server.py` | FastAPI + SSE + `/api/metrics`, порт `8787` |
-| `web/` | Тёмный Cursor-like UI (чат + правая панель монитора) |
-| `open_web.py` | Лаунчер: Ollama (если нужно) + сервер + браузер |
-| `examples/ask_sdk.py` | Минимальный пример SDK |
-| `AGENTS.md` | Карта для AI-агентов |
+| Ядро | Python 3.10+, пакет `qwen_orchestra` |
+| Локальные модели | [Ollama](https://ollama.com) (HTTP API) |
+| Внешние модели | [OpenRouter](https://openrouter.ai) (опционально) |
+| Веб-сервер | FastAPI, Uvicorn, Pydantic, SSE |
+| Метрики | psutil, nvidia-smi, Ollama `/api/ps` |
+| Web-tools | ddgs (+ fetch URL) |
+| UI | vanilla JS/CSS/HTML, без npm/CDN |
+| Рендер чата | marked, DOMPurify, highlight.js, KaTeX (`web/vendor/`) |
+| Лаунчер | `open_web.py` → опционально `QwenChat.exe` (PyInstaller) |
+
+Публичный вход для приложений: `qwen_orchestra.Client`. Слоты и промпты роутера — `settings.json` / UI.
+
+---
+
+## Особенности
+
+- Роутер и selfcheck остаются **локальными**; эскалация **пропускает** неустановленные optional-тиры.
+- У Qwen3.5 всегда `think: false` — иначе ломаются JSON-роутер и tools.
+- Приоритет контекста: **не обрезать запрос**, затем экономия VRAM (`num_ctx` 256…8192).
+- Чаты **in-memory** (сбрасываются при рестарте сервера).
+- Слушает только localhost; без auth, без светлой темы, без редактора кода.
+- На ~8 ГБ VRAM 14b часто hybrid CPU/GPU — медленнее 9b на полном GPU.
+
+---
+
+## Документация
+
+| Файл | Для кого |
+|------|----------|
+| [SETUP.md](SETUP.md) | Установка, модели, запуск, CLI, SDK |
+| [AGENTS.md](AGENTS.md) | Карта кода и правила для AI-агентов |
+| [THANKS_NEURAL_NETS.md](THANKS_NEURAL_NETS.md) | Благодарность нейронкам |
 
 ---
 

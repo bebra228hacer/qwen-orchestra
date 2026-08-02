@@ -45,5 +45,5 @@ Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_ur
 - Не слушать `0.0.0.0`; не добавлять light-theme / auth / code-editor без запроса
 - `start.bat` — CP866 без BOM + `cd /d "%~dp0"`
 - После правок лаунчера пересобрать `QwenChat.exe` (см. AGENTS.md)
-- Документацию держать в синхроне: `README.md`, `AGENTS.md`, этот файл
+- Документацию держать в синхроне: `README.md` (обзор), `SETUP.md` (установка), `AGENTS.md`, этот файл
 - Ответы пользователю — на русском
