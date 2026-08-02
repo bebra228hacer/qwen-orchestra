@@ -25,3 +25,4 @@ Desktop.ini
 # User orchestra settings (models + router prompts)
 settings.json
 secrets.json
+share.json

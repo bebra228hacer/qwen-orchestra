@@ -57,14 +57,24 @@ ollama pull qwen2.5-coder:14b
 ```powershell
 python server.py
 # → http://127.0.0.1:8787
+
+# Открыть в сеть (LAN / уже проброшенный порт) — один общий сеанс:
+python server.py --share
+python server.py --share --token СЕКРЕТ   # браузер спросит пароль (логин любой)
+# IP и порт гостя — из share.json (рядом с settings.json); IP подтягивается сам.
+# Пример: share.json.example → share.json  {"public_ip":"…","port":ВАШ_ПОРТ}
 ```
 
-Лаунчер (Ollama при необходимости + сервер + браузер):
+Лаунчер (Ollama при необходимости + сервер + браузер; спросит локально / в сеть):
 
 ```powershell
 python open_web.py
+python open_web.py --share --token СЕКРЕТ
+python open_web.py --local                # без вопроса, только этот ПК
 # или QwenChat.bat / QwenChat.exe
 ```
+
+Гостю: ссылка вида `http://ВАШ_IP:порт` печатается при `--share` (из `share.json`). Тот же UI/чаты/настройки, что у вас. Без `--token` доступен любому, кто дойдёт до порта (в т.ч. OpenRouter-ключ в настройках).
 
 Сборка exe после правок `open_web.py`:
 
@@ -90,17 +100,20 @@ python chat_web.py
 
 ### SDK
 
+Полный контракт для ботов и AI-агентов другого проекта: **[docs/SDK.md](docs/SDK.md)**.  
+Шпаргалка в чужой репо: [docs/SDK_FOR_AGENTS.md](docs/SDK_FOR_AGENTS.md).
+
 ```python
 from qwen_orchestra import Client
 
-client = Client()  # ollama_host=..., settings_path=...
+client = Client()  # ollama_host=..., settings_path=... (изолируй путь в боте!)
 print(client.health())
 print(client.route("напиши функцию сортировки"))
 result = client.ask("2+2")
 print(result.text, result.tier, result.model)
 ```
 
-Пример: `examples/ask_sdk.py`.  
+Примеры: `examples/ask_sdk.py`, `examples/ask_sdk_bot.py` (Ollama + OpenRouter).  
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
 
 ---

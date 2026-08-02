@@ -1,8 +1,16 @@
-"""Локальный веб-сервер: Cursor-like UI + оркестр (только 127.0.0.1)."""
+"""Локальный веб-сервер: Cursor-like UI + оркестр (по умолчанию 127.0.0.1).
+
+Режим --share: слушает 0.0.0.0 (проброшенный порт / LAN). Опционально --token —
+простой HTTP Basic (пароль = токен), без мультипользователей.
+"""
 
 from __future__ import annotations
 
+import base64
 import json
+import os
+import secrets
+import socket
 import threading
 import time
 import uuid
@@ -13,7 +21,7 @@ from typing import Any, Iterator
 import urllib.error
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -22,22 +30,62 @@ from qwen_orchestra.metrics import collect as collect_metrics
 from qwen_orchestra.orchestra import MODELS, handle, missing_models, missing_optional_models
 from qwen_orchestra import settings as app_settings
 
+import share_config
+
 app_settings.ensure_bootstrapped()
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
-ALLOWED_HOSTS = frozenset(
-    {
-        "127.0.0.1",
-        "localhost",
-        "127.0.0.1:8787",
-        "localhost:8787",
-        "[::1]",
-        "[::1]:8787",
-    }
-)
+DEFAULT_PORT = share_config.DEFAULT_LOCAL_PORT
 SSE_QUEUE_MAX = 512
 MAX_MESSAGE_CHARS = 100_000
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def share_mode() -> bool:
+    return _env_truthy("QWEN_SHARE")
+
+
+def share_token() -> str:
+    return os.environ.get("QWEN_SHARE_TOKEN", "").strip()
+
+
+def listen_port() -> int:
+    raw = os.environ.get("QWEN_PORT", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    if share_mode():
+        cfg = share_config.configured_share_port()
+        if cfg is not None:
+            return cfg
+    return DEFAULT_PORT
+
+
+def _localhost_hosts(port: int) -> frozenset[str]:
+    return frozenset(
+        {
+            "127.0.0.1",
+            "localhost",
+            f"127.0.0.1:{port}",
+            f"localhost:{port}",
+            "[::1]",
+            f"[::1]:{port}",
+        }
+    )
+
+
+def _localhost_origins(port: int) -> frozenset[str]:
+    return frozenset(
+        {
+            f"http://127.0.0.1:{port}",
+            f"http://localhost:{port}",
+            f"http://[::1]:{port}",
+            "null",
+        }
+    )
 
 app = FastAPI(title="Qwen Orchestra Chat", docs_url=None, redoc_url=None)
 
@@ -147,22 +195,48 @@ def _worker_lock(chat_id: str) -> threading.Lock:
         return lock
 
 
+def _check_share_basic_auth(request: Request) -> Response | None:
+    """Опциональный пароль в --share: HTTP Basic (пароль = QWEN_SHARE_TOKEN)."""
+    token = share_token()
+    if not token:
+        return None
+    # Лаунчер ждёт /api/ready без пароля
+    if request.url.path == "/api/ready":
+        return None
+    header = (request.headers.get("authorization") or "").strip()
+    if header.lower().startswith("basic "):
+        try:
+            raw = base64.b64decode(header[6:].strip()).decode("utf-8", errors="replace")
+        except (ValueError, UnicodeError):
+            raw = ""
+        # user:pass — принимаем, если pass == token (user любой) или user == token
+        user, _, password = raw.partition(":")
+        if secrets.compare_digest(password, token) or secrets.compare_digest(user, token):
+            return None
+    return Response(
+        content="Unauthorized",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Qwen Orchestra", charset="UTF-8"'},
+        media_type="text/plain",
+    )
+
+
 @app.middleware("http")
-async def localhost_host_guard(request: Request, call_next):  # noqa: ANN001
-    """Защита от DNS rebinding: принимаем только localhost Host."""
+async def access_guard(request: Request, call_next):  # noqa: ANN001
+    """Локально — только localhost Host/Origin; в --share — Basic Auth (если задан токен)."""
+    if share_mode():
+        denied = _check_share_basic_auth(request)
+        if denied is not None:
+            return denied
+        return await call_next(request)
+
+    port = listen_port()
     host = (request.headers.get("host") or "").strip().lower()
-    if host and host not in ALLOWED_HOSTS:
+    if host and host not in _localhost_hosts(port):
         return JSONResponse({"detail": "Forbidden host"}, status_code=403)
     origin = (request.headers.get("origin") or "").strip().lower()
     if origin and request.method in {"POST", "PUT", "DELETE", "PATCH"}:
-        # browser Origin вида http://127.0.0.1:8787
-        allowed_origins = {
-            "http://127.0.0.1:8787",
-            "http://localhost:8787",
-            "http://[::1]:8787",
-            "null",  # file:// / некоторые локальные кейсы
-        }
-        if origin not in allowed_origins:
+        if origin not in _localhost_origins(port):
             return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
     return await call_next(request)
 
@@ -588,13 +662,107 @@ def index() -> FileResponse:
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+def _lan_ipv4() -> list[str]:
+    """Локальные IPv4 (кроме loopback) — подсказка для LAN-доступа."""
+    found: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in found:
+                found.append(ip)
+    except OSError:
+        pass
+    if not found:
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                probe.connect(("8.8.8.8", 80))
+                ip = probe.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    found.append(ip)
+            finally:
+                probe.close()
+        except OSError:
+            pass
+    return found
+
+
 def main() -> None:
+    import argparse
+
     import uvicorn
+
+    parser = argparse.ArgumentParser(description="Qwen Orchestra web chat")
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="Слушать 0.0.0.0 (LAN / проброшенный порт). Один общий сеанс без аккаунтов.",
+    )
+    parser.add_argument(
+        "--token",
+        default="",
+        help="Пароль для --share (HTTP Basic). Пусто = без пароля (не рекомендуется в интернет).",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Порт. В --share по умолчанию из share.json (иначе 8787).",
+    )
+    parser.add_argument(
+        "--host",
+        default="",
+        help="Bind-адрес. По умолчанию: 127.0.0.1 или 0.0.0.0 при --share.",
+    )
+    args = parser.parse_args()
+
+    if args.share:
+        os.environ["QWEN_SHARE"] = "1"
+    if args.token.strip():
+        os.environ["QWEN_SHARE_TOKEN"] = args.token.strip()
+
+    sharing = share_mode()
+    if sharing:
+        public_ip = share_config.ensure_public_ip(refresh=True)
+        port = share_config.resolve_share_port(args.port)
+        share_config.remember_share_endpoint(public_ip, port)
+        os.environ["QWEN_PORT"] = str(port)
+    else:
+        if args.port > 0:
+            os.environ["QWEN_PORT"] = str(args.port)
+        port = listen_port()
+        public_ip = None
+
+    host = (args.host.strip() or ("0.0.0.0" if sharing else "127.0.0.1"))
+
+    if sharing:
+        guest = share_config.guest_url(public_ip, port)
+        print("Режим SHARE: сервер доступен с сети (один общий чат/настройки).")
+        print(f"  bind: {host}:{port}")
+        print(f"  локально: http://127.0.0.1:{port}")
+        if guest:
+            print(f"  гостю: {guest}")
+        else:
+            print("  гостю: задайте public_ip/port в share.json")
+        for ip in _lan_ipv4():
+            print(f"  в LAN: http://{ip}:{port}")
+        print(f"  конфиг: {share_config.share_config_path()}")
+        if share_token():
+            print("  пароль: задан (--token / QWEN_SHARE_TOKEN), браузер спросит логин/пароль")
+            print("          (логин любой, пароль = ваш токен)")
+        else:
+            print("  ВНИМАНИЕ: пароль не задан — любой, кто дойдёт до порта, увидит чаты")
+            print("            и сможет менять настройки/OpenRouter-ключ.")
+            print("            Запуск с паролем: python server.py --share --token СЕКРЕТ")
+        print()
+    else:
+        print(f"Локальный режим: http://127.0.0.1:{port}")
 
     uvicorn.run(
         "server:app",
-        host="127.0.0.1",
-        port=8787,
+        host=host,
+        port=port,
         reload=False,
         log_level="info",
     )

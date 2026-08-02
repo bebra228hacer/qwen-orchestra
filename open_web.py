@@ -2,6 +2,10 @@
 
 Ollama, поднятая этим лаунчером, останавливается вместе с сервером/консолью.
 Уже работавшую до запуска Ollama не трогаем.
+
+Режимы доступа:
+  локальный (по умолчанию) — только этот ПК;
+  --share — 0.0.0.0 (LAN / проброшенный порт), опционально --token.
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -17,16 +22,20 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-HOST = "127.0.0.1"
-PORT = 8787
-URL = f"http://{HOST}:{PORT}"
-READY = f"{URL}/api/ready"
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 8787
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 
 # Процессы, которые лаунчер обязан погасить при выходе
 _owned_ollama: subprocess.Popen | None = None
 _owned_server: subprocess.Popen | None = None
 _cleanup_done = False
+
+
+def _share_config():
+    import share_config
+
+    return share_config
 
 
 def _root() -> Path:
@@ -48,10 +57,14 @@ def _python() -> str:
     )
 
 
-def healthy() -> bool:
+def _ready_url(port: int) -> str:
+    return f"http://{DEFAULT_HOST}:{port}/api/ready"
+
+
+def healthy(port: int = DEFAULT_PORT) -> bool:
     """Сервер принял соединение (не ждём Ollama)."""
     try:
-        with urllib.request.urlopen(READY, timeout=1.0) as resp:
+        with urllib.request.urlopen(_ready_url(port), timeout=1.0) as resp:
             return 200 <= resp.status < 300
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
@@ -194,10 +207,10 @@ def ensure_ollama(wait_seconds: float = 30.0) -> tuple[bool, subprocess.Popen | 
     return False, None
 
 
-def wait_ready(seconds: float = 45.0) -> bool:
+def wait_ready(port: int, seconds: float = 45.0) -> bool:
     deadline = time.time() + seconds
     while time.time() < deadline:
-        if healthy():
+        if healthy(port):
             return True
         time.sleep(0.25)
     return False
@@ -238,6 +251,128 @@ def open_browser(url: str) -> bool:
     return False
 
 
+def _lan_ipv4() -> list[str]:
+    found: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in found:
+                found.append(ip)
+    except OSError:
+        pass
+    if not found:
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                probe.connect(("8.8.8.8", 80))
+                ip = probe.getsockname()[0]
+                if ip and not ip.startswith("127."):
+                    found.append(ip)
+            finally:
+                probe.close()
+        except OSError:
+            pass
+    return found
+
+
+def _parse_args(argv: list[str] | None = None) -> tuple[bool, str, int, bool, bool]:
+    """Возвращает (share, token, port, ask_mode, port_from_cli)."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Лаунчер веб-чата Qwen Orchestra")
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="Открыть порт в сеть (0.0.0.0), один общий сеанс",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Только этот ПК (по умолчанию, без интерактивного вопроса)",
+    )
+    parser.add_argument("--token", default="", help="Пароль для --share (HTTP Basic)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="Порт. В --share берётся из share.json, если не указан.",
+    )
+    args = parser.parse_args(argv)
+
+    share = bool(args.share) or os.environ.get("QWEN_SHARE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    token = (args.token or os.environ.get("QWEN_SHARE_TOKEN", "")).strip()
+    port_from_cli = int(args.port) > 0
+    port = int(args.port) if port_from_cli else 0
+    ask = not args.share and not args.local and sys.stdin.isatty()
+    return share, token, port, ask, port_from_cli
+
+
+def _choose_access_mode() -> tuple[bool, str]:
+    sc = _share_config()
+    guest = sc.guest_url()
+    print()
+    print("  Доступ к веб-чату:")
+    print("    1) Только этот ПК          (127.0.0.1)  [Enter]")
+    if guest:
+        print(f"    2) Открыть в сеть          ({guest})")
+    else:
+        print("    2) Открыть в сеть          (IP/порт из share.json)")
+    print()
+    try:
+        choice = input("  Выбор (1/2): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False, ""
+    if choice == "2":
+        try:
+            token = input("  Пароль для гостя (Enter = без пароля): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            token = ""
+        return True, token
+    return False, ""
+
+
+def _ensure_share_endpoint(port: int, port_from_cli: bool) -> int:
+    """Подставить IP и порт из share.json; при отсутствии порта — спросить один раз."""
+    sc = _share_config()
+    public_ip = sc.ensure_public_ip(refresh=True)
+    if port_from_cli and port > 0:
+        sc.remember_share_endpoint(public_ip, port)
+        return port
+
+    cfg_port = sc.configured_share_port()
+    if cfg_port is not None:
+        sc.remember_share_endpoint(public_ip, cfg_port)
+        return cfg_port
+
+    if sys.stdin.isatty():
+        hint = f" (сейчас IP {public_ip})" if public_ip else ""
+        print()
+        print(f"  В share.json ещё нет порта проброса{hint}.")
+        try:
+            raw = input(f"  Ваш открытый порт [{DEFAULT_PORT}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            raw = ""
+        chosen = int(raw) if raw.isdigit() else DEFAULT_PORT
+        if not (1 <= chosen <= 65535):
+            chosen = DEFAULT_PORT
+        sc.remember_share_endpoint(public_ip, chosen)
+        return chosen
+
+    # без TTY — fallback
+    chosen = DEFAULT_PORT
+    sc.remember_share_endpoint(public_ip, chosen)
+    return chosen
+
+
 def main() -> int:
     global _owned_ollama, _owned_server
 
@@ -245,16 +380,34 @@ def main() -> int:
     root = _root()
     server_py = root / "server.py"
 
+    share, token, port, ask, port_from_cli = _parse_args()
+    if ask:
+        share, token = _choose_access_mode()
+
+    if share:
+        port = _ensure_share_endpoint(port, port_from_cli)
+    elif not port_from_cli:
+        port = DEFAULT_PORT
+
+    local_url = f"http://{DEFAULT_HOST}:{port}"
+    sc = _share_config()
+    guest = sc.guest_url(port=port) if share else None
+
     ok, owned = ensure_ollama()
     if not ok:
         input("Enter — выход...")
         return 1
     _owned_ollama = owned
 
-    if healthy():
-        print(f"Сервер уже запущен: {URL}")
-        open_browser(URL)
-        print(f"Браузер: {URL}")
+    if healthy(port):
+        print(f"Сервер уже запущен: {local_url}")
+        if share:
+            print("  Подсказка: уже работающий процесс мог быть запущен без --share.")
+            print("  Остановите его и перезапустите лаунчер, если нужен доступ из сети.")
+            if guest:
+                print(f"  Гостю: {guest}")
+        open_browser(local_url)
+        print(f"Браузер: {local_url}")
         if _owned_ollama is not None:
             print("Ollama поднята лаунчером — Enter / Ctrl+C остановит её.")
             try:
@@ -281,14 +434,41 @@ def main() -> int:
     cmd = [py, str(server_py)]
     if Path(py).name.lower() in {"py.exe", "py"}:
         cmd = [py, "-3", str(server_py)]
+    if share:
+        cmd.append("--share")
+        cmd.extend(["--port", str(port)])
+    elif port_from_cli:
+        cmd.extend(["--port", str(port)])
+    if token:
+        cmd.extend(["--token", token])
 
-    print(f"Запуск сервера: {URL}")
+    env = os.environ.copy()
+    if share:
+        env["QWEN_SHARE"] = "1"
+        env["QWEN_PORT"] = str(port)
+        if sc.configured_public_ip():
+            env["QWEN_PUBLIC_IP"] = sc.configured_public_ip()
+    if token:
+        env["QWEN_SHARE_TOKEN"] = token
+
+    print(f"Запуск сервера: {local_url}")
+    if share:
+        print("Режим SHARE — один общий сеанс (чаты/настройки как у вас).")
+        if guest:
+            print(f"  Гостю отдайте: {guest}")
+        for ip in _lan_ipv4():
+            print(f"  LAN: http://{ip}:{port}")
+        print(f"  Конфиг: {sc.share_config_path()}")
+        if token:
+            print("  Пароль задан (логин любой, пароль = ваш токен)")
+        else:
+            print("  Без пароля — кто дойдёт до порта, получит полный доступ к UI.")
     print("Остановка: Ctrl+C (или закрытие консоли) — погасит сервер и Ollama")
     print()
 
-    _owned_server = subprocess.Popen(cmd, cwd=str(root))
+    _owned_server = subprocess.Popen(cmd, cwd=str(root), env=env)
 
-    if not wait_ready():
+    if not wait_ready(port):
         print("Сервер не ответил вовремя. Проверьте:")
         print("  pip install -r requirements.txt")
         if _owned_server.poll() is not None:
@@ -297,8 +477,10 @@ def main() -> int:
         input("Enter — выход...")
         return 1
 
-    open_browser(URL)
-    print(f"Браузер: {URL}")
+    open_browser(local_url)
+    print(f"Браузер: {local_url}")
+    if guest:
+        print(f"Гостю: {guest}")
     print()
 
     try:

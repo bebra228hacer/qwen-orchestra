@@ -49,7 +49,10 @@
 | `web/` | UI: `index.html`, `styles.css`, `app.js` (чат + правая панель монитора) |
 | `web/vendor/` | Фронт-библиотеки: marked, DOMPurify, highlight.js, KaTeX (+ тема/шрифты) |
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
-| `examples/ask_sdk.py` | Пример встраивания `Client` |
+| `examples/ask_sdk.py` | Минимальный пример `Client` |
+| `examples/ask_sdk_bot.py` | Шаблон бота: изолированный settings + OpenRouter |
+| `docs/SDK.md` | Полный SDK-гайд для другого проекта / AI-агента |
+| `docs/SDK_FOR_AGENTS.md` | Drop-in правило для `.cursor/rules/` чужого репо |
 | `QwenChat.exe` / `QwenChat.bat` | Сборка/обёртка лаунчера |
 | `start.bat` | Меню режимов (CP866, `cd /d "%~dp0"`) |
 | `README.md` | Обзор продукта: возможности, стек, особенности |
@@ -217,7 +220,7 @@ Web-tool результаты **кэшируются** между retry (пов�
 
 Регулировка в `orchestra.py`: `MAX_ATTEMPTS`, `SELFCHECK_LLM`, `SELFCHECK_MODEL`.
 
-## Веб-API (`server.py`, порт **8787**, host **127.0.0.1**)
+## Веб-API (`server.py`, порт **8787**, host по умолчанию **127.0.0.1**)
 
 | Метод | Путь | Назначение |
 |---|---|---|
@@ -243,7 +246,8 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 - `check`: `{ok, problems, note, attempt, model, checked}` — результат самопроверки.
 - `done`: `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`.
 
-Middleware: только Host `127.0.0.1`/`localhost` (+порт); для мутаций — Origin localhost (защита от DNS rebinding).
+Middleware (локальный режим): только Host `127.0.0.1`/`localhost` (+порт); для мутаций — Origin localhost (DNS rebinding).
+Режим **`--share`** / `QWEN_SHARE=1`: bind `0.0.0.0`, Host/Origin не режутся; опционально `QWEN_SHARE_TOKEN` / `--token` — HTTP Basic (пароль = токен; `/api/ready` без пароля для лаунчера). Публичный URL гостя — из `share.json` (`public_ip` + `port`; IP можно обновить автодетектом). Один общий сеанс (не multi-user). Лаунчер `open_web.py` спрашивает режим при старте (`--local` / `--share`).
 Параллельные сообщения / clear / delete сериализуются worker-lock’ом; после clear ответ старого worker не дописывается (`generation`).
 
 `/api/health`: `ok` = есть ≥1 доступная модель пула (Ollama или OpenRouter); `missing` критичен; `missing_optional` — назначенные, но недоступные (не ломают ok);
@@ -272,11 +276,14 @@ Middleware: только Host `127.0.0.1`/`localhost` (+порт); для мут
 # CLI оркестр
 python orchestra_chat.py
 
-# Веб
+# Веб (локально)
 python server.py
 # → http://127.0.0.1:8787
 
-# Лаунчер (одна консоль, открывает браузер)
+# Веб в сеть (проброшенный порт / LAN), опционально пароль
+python server.py --share --token СЕКРЕТ
+
+# Лаунчер (одна консоль, открывает браузер; спросит локально/сеть)
 python open_web.py
 # или QwenChat.exe / QwenChat.bat
 ```
@@ -296,7 +303,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 ## UI-ограничения продукта
 
 - Только **тёмная** тема, без light-switch.
-- Один локальный пользователь, без auth.
+- Один пользователь / один общий сеанс (в `--share` гость видит то же, что вы); без аккаунтов.
 - Нет редактора кода / файлового дерева / диффов (пока).
 - Визуал: Cursor-like (серый/уголь), без фиолетовых AI-градиентов.
 - Правая панель — монитор ресурсов (не Tools/Logs); свёртываемая, ресайз.
@@ -311,13 +318,14 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
    размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`;
    локальные данные ПК — в `tools_local.py` + детектор в `router.need_local_time`.
 4. Лаунчер readiness — только `/api/ready`; тяжёлые проверки Ollama — в `/api/health`.
-5. Не слушать `0.0.0.0` без явной просьбы пользователя.
+5. По умолчанию слушать `127.0.0.1`; `0.0.0.0` — только через явный `--share` / `QWEN_SHARE` (не делать share режимом по умолчанию).
 6. Не добавлять светлую тему / аккаунты / IDE без запроса.
 7. CLI (`orchestra_chat.py` и др.) оставлять рабочими; shim-модули в корне — для совместимости.
 8. Отвечать пользователю **по-русски**, если не попросил иначе.
 9. Коммиты — только по явной просьбе.
-10. При смене тиров / контекста / API / SDK — обновлять `README.md` (обзор), `SETUP.md` (установка/запуск), `AGENTS.md`, `.cursor/rules/qwen-orchestra.mdc`.
+10. При смене тиров / контекста / API / SDK — обновлять `README.md` (обзор), `SETUP.md` (установка/запуск), `AGENTS.md`, `docs/SDK.md`, `.cursor/rules/qwen-orchestra.mdc`.
 11. Перед полным «найди баги по всему проекту» — сначала `CODE_AUDIT.md`; повторный аудит только после крупных правок или по просьбе; при фиксе обновляй статусы там.
+12. Для встраивания оркестра в чужой бот агенту другого репо достаточно [docs/SDK.md](docs/SDK.md) + `Client` — не копировать внутренности `orchestra`/`router`.
 
 ## Типичный roadmap (ещё не сделано)
 

@@ -1,4 +1,4 @@
-"""Qwen Orchestra — локальный SDK поверх Ollama.
+"""Qwen Orchestra — локальный SDK поверх Ollama (+ OpenRouter).
 
 Публичный вход для приложений::
 
@@ -6,6 +6,8 @@
 
     client = Client()
     result = client.ask("привет")
+
+Полная документация для встраивания в другой проект: ``docs/SDK.md``.
 """
 
 from __future__ import annotations

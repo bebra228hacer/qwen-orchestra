@@ -1,0 +1,5 @@
+{
+  "public_ip": "YOUR.STATIC.PUBLIC.IP",
+  "port": 25565,
+  "static": true
+}
