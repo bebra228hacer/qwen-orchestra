@@ -9,7 +9,7 @@ alwaysApply: true
 
 ## Стек
 
-- SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `selfcheck` + `llm` + `tools_web` + `settings`
+- SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `selfcheck` + `llm` + `tools_web` + `tools_local` + `settings`
 - Цикл: `route → plan_worker_context → worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/` (чат + правая панель монитора)
 - Метрики: `qwen_orchestra.metrics` → `GET /api/metrics` (psutil, nvidia-smi + температуры, Ollama `/api/ps`)
@@ -32,9 +32,13 @@ Floor (код): tiny только приветствия/арифметика; �
 
 ## Контекст
 
-`num_ctx = ceil_256(prompt + 128 + reserve_ответа + safety)` ∈ [256…8192]. 
+База: `base = ceil_256(prompt + 128 + reserve_ответа + safety)`.
+Затем per-model: `num_ctx = ceil_256(base * (1 + ctx_overhead_pct/100))` ∈ [256…`max_ctx`|8192].
+Поля пула: `ctx_overhead_pct` (0…900; 300 → ×4), `max_ctx` (опц.).
+Defaults по тиру: tiny/nano/small/mid = 300/200/100/50 (+ max 4096 у мелких); large+ = 0.
 Приоритет: не обрезать запрос; затем минимум VRAM. История для сложных тиров — только по отсылкам. Логика — `plan_worker_context` в `orchestra.py`.
 Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_url` читает ограниченный объём байт.
+Local time: tiny `need_local_time` (без regex; любое упоминание времени/даты → true) → снимок часов ПК в system (`tools_local`).
 
 ## При изменениях
 

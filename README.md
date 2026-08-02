@@ -11,8 +11,9 @@
 - **Авто-роутинг** по тирам tiny→frontier; модели живут в **пуле** (несколько на тир, rank = приоритет). Ручной выбор модели в UI.
 - **Детерминированный floor/ceiling** — tiny не «занижает» сложность; «кратко» держит потолок mid.
 - **Самопроверка ответа** (правила + LLM-ревью) и **retry с эскалацией по rank** до нескольких попыток.
-- **Адаптивный `num_ctx`** — минимальное окно под запрос, история для тяжёлых тиров только по отсылкам.
+- **Адаптивный `num_ctx`** — минимум под запрос + опциональный запас % / потолок на модель пула; история для тяжёлых тиров только по отсылкам.
 - **Web-tools** — поиск и чтение URL (кэш между retry, лимиты вызовов).
+- **Локальное время ПК** — tiny решает, нужен ли вопрос про часы/дату; при «да» подставляются часы/TZ с машины.
 - **Веб-UI** — чаты, Markdown/код/формулы, чипы статуса, «Модели и промпты», монитор CPU/RAM/GPU/Ollama.
 - **OpenRouter** — внешняя модель в пуле (с тиром или только вручную; ключ в env / `secrets.json`); tools пока только на Ollama.
 - **Python SDK** — `from qwen_orchestra import Client` (ask / route / health / settings in-process).
@@ -21,7 +22,7 @@
 Defaults: `0.8b` · `nano` · `2b` · `4b` · `7b` · `9b` · `14b` · `coder` · `ultra` · `frontier`. Модель без тира — только ручной выбор.
 
 ```
-user → route → plan context → worker (± web) → selfcheck
+user → route → plan context → worker (± web / ± время ПК) → selfcheck
                  ↑                                    │ не ok
                  └──────── retry (больший rank) ──────┘
 ```
@@ -38,6 +39,7 @@ user → route → plan context → worker (± web) → selfcheck
 | Веб-сервер | FastAPI, Uvicorn, Pydantic, SSE |
 | Метрики | psutil, nvidia-smi, Ollama `/api/ps` |
 | Web-tools | ddgs (+ fetch URL) |
+| Local tools | часы/дата/TZ с ПК (`tools_local`) |
 | UI | vanilla JS/CSS/HTML, без npm/CDN |
 | Рендер чата | marked, DOMPurify, highlight.js, KaTeX (`web/vendor/`) |
 | Лаунчер | `open_web.py` → опционально `QwenChat.exe` (PyInstaller) |
@@ -50,7 +52,7 @@ user → route → plan context → worker (± web) → selfcheck
 
 - Роутер и selfcheck остаются **локальными**; эскалация идёт по **rank** моделей пула.
 - У Qwen3.5 всегда `think: false` — иначе ломаются JSON-роутер и tools.
-- Приоритет контекста: **не обрезать запрос**, затем экономия VRAM (`num_ctx` 256…8192).
+- Приоритет контекста: **не обрезать запрос**, затем экономия VRAM (`num_ctx` 256…8192; запас % / max ctx — на модель пула).
 - Чаты **in-memory** (сбрасываются при рестарте сервера).
 - Слушает только localhost; без auth, без светлой темы, без редактора кода.
 - На ~8 ГБ VRAM 14b часто hybrid CPU/GPU — медленнее 9b на полном GPU.

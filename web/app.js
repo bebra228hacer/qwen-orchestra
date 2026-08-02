@@ -27,6 +27,8 @@
     addSlotModel: $("#add-slot-model"),
     addSlotModelOr: $("#add-slot-model-or"),
     addSlotRank: $("#add-slot-rank"),
+    addSlotCtxOh: $("#add-slot-ctx-oh"),
+    addSlotMaxCtx: $("#add-slot-max-ctx"),
     addSlotPrompt: $("#add-slot-prompt"),
     orApiKey: $("#or-api-key"),
     orKeyStatus: $("#or-key-status"),
@@ -415,7 +417,7 @@
     selectEl.innerHTML = "";
     const none = document.createElement("option");
     none.value = "";
-    none.textContent = "не участвует в роутинге";
+    none.textContent = "вне роутинга";
     selectEl.appendChild(none);
     const src =
       state.fixedTiers.length > 0
@@ -640,11 +642,43 @@
     return 0;
   }
 
+  function defaultCtxOhFor(tierId) {
+    const t = (state.fixedTiers || []).find((x) => x.id === tierId);
+    if (t && t.ctx_overhead_pct != null) return Number(t.ctx_overhead_pct);
+    const fallback = {
+      tiny: 300,
+      nano: 200,
+      small: 100,
+      mid: 50,
+    };
+    return fallback[tierId] != null ? fallback[tierId] : 0;
+  }
+
+  function defaultMaxCtxFor(tierId) {
+    const t = (state.fixedTiers || []).find((x) => x.id === tierId);
+    if (t && "max_ctx" in t) {
+      return t.max_ctx != null ? Number(t.max_ctx) : "";
+    }
+    if (tierId === "tiny" || tierId === "nano" || tierId === "small") return 4096;
+    return "";
+  }
+
+  function applyAddFormCtxDefaults() {
+    const tier = ((els.addSlotTier && els.addSlotTier.value) || "").trim();
+    if (els.addSlotCtxOh) {
+      els.addSlotCtxOh.value = String(defaultCtxOhFor(tier || null));
+    }
+    if (els.addSlotMaxCtx) {
+      const mx = defaultMaxCtxFor(tier || null);
+      els.addSlotMaxCtx.value = mx === "" || mx == null ? "" : String(mx);
+    }
+  }
+
   function fillCardTierSelect(selectEl, selected) {
     selectEl.innerHTML = "";
     const none = document.createElement("option");
     none.value = "";
-    none.textContent = "не участвует в роутинге";
+    none.textContent = "вне роутинга";
     selectEl.appendChild(none);
     const src =
       state.fixedTiers.length > 0
@@ -833,6 +867,46 @@
       meta.appendChild(rankWrap);
       card.appendChild(meta);
 
+      const ctxRow = document.createElement("div");
+      ctxRow.className = "slot-ctx-row";
+
+      const ohWrap = document.createElement("div");
+      ohWrap.className = "field-with-label ctx-oh-field";
+      const ohLab = document.createElement("label");
+      ohLab.className = "field-label";
+      ohLab.textContent = "Запас ctx %";
+      const ohInp = document.createElement("input");
+      ohInp.className = "text-input rank-input slot-ctx-oh";
+      ohInp.type = "number";
+      ohInp.min = "0";
+      ohInp.max = "900";
+      ohInp.value = String(slot.ctx_overhead_pct ?? 0);
+      ohInp.title = "0 = минимум; 300 = база×4";
+      ohWrap.appendChild(ohLab);
+      ohWrap.appendChild(ohInp);
+
+      const maxWrap = document.createElement("div");
+      maxWrap.className = "field-with-label ctx-max-field";
+      const maxLab = document.createElement("label");
+      maxLab.className = "field-label";
+      maxLab.textContent = "max ctx";
+      const maxInp = document.createElement("input");
+      maxInp.className = "text-input rank-input slot-max-ctx";
+      maxInp.type = "number";
+      maxInp.min = "256";
+      maxInp.max = "32768";
+      maxInp.step = "256";
+      maxInp.placeholder = "8192";
+      maxInp.value =
+        slot.max_ctx != null && slot.max_ctx !== "" ? String(slot.max_ctx) : "";
+      maxInp.title = "Потолок num_ctx для этой модели (пусто = 8192)";
+      maxWrap.appendChild(maxLab);
+      maxWrap.appendChild(maxInp);
+
+      ctxRow.appendChild(ohWrap);
+      ctxRow.appendChild(maxWrap);
+      card.appendChild(ctxRow);
+
       const promptInp = document.createElement("textarea");
       promptInp.className = "prompt-input slot-prompt";
       promptInp.rows = 2;
@@ -858,6 +932,8 @@
       const provEl = card.querySelector(".slot-provider");
       const tierEl = card.querySelector(".slot-tier");
       const rankEl = card.querySelector(".slot-rank");
+      const ohEl = card.querySelector(".slot-ctx-oh");
+      const maxEl = card.querySelector(".slot-max-ctx");
       const provider =
         (provEl && provEl.value) || card.dataset.provider || "ollama";
       const model = ((modelEl && modelEl.value) || "").trim();
@@ -865,6 +941,8 @@
         throw new Error("У каждой записи пула должна быть модель");
       }
       const tier = ((tierEl && tierEl.value) || "").trim() || null;
+      const ohRaw = ohEl && ohEl.value !== "" ? Number(ohEl.value) : 0;
+      const maxRaw = maxEl && String(maxEl.value || "").trim();
       out.push({
         id,
         model,
@@ -875,6 +953,8 @@
           ? Number(rankEl && rankEl.value) || defaultRankFor(tier)
           : null,
         provider,
+        ctx_overhead_pct: Number.isFinite(ohRaw) ? Math.max(0, Math.min(900, ohRaw)) : 0,
+        max_ctx: maxRaw ? Number(maxRaw) || null : null,
       });
     }
     return out;
@@ -993,6 +1073,11 @@
     setModelsStatus("Добавление…");
     try {
       await persistDraftSlots();
+      const ohRaw = Number(els.addSlotCtxOh && els.addSlotCtxOh.value);
+      const maxRaw =
+        els.addSlotMaxCtx && String(els.addSlotMaxCtx.value || "").trim() !== ""
+          ? Number(els.addSlotMaxCtx.value)
+          : null;
       const body = {
         model,
         provider,
@@ -1002,6 +1087,13 @@
         rank:
           tier && Number.isFinite(Number(els.addSlotRank.value))
             ? Number(els.addSlotRank.value)
+            : null,
+        ctx_overhead_pct: Number.isFinite(ohRaw)
+          ? Math.max(0, Math.min(900, ohRaw))
+          : 0,
+        max_ctx:
+          maxRaw != null && Number.isFinite(maxRaw)
+            ? Math.max(256, Math.min(32768, maxRaw))
             : null,
       };
       const data = await api("/api/settings/models", {
@@ -1017,6 +1109,9 @@
       renderOpenRouterStatus(data.providers);
       els.addSlotPrompt.value = "";
       els.addSlotModelOr.value = "";
+      if (els.addSlotCtxOh) els.addSlotCtxOh.value = "0";
+      if (els.addSlotMaxCtx) els.addSlotMaxCtx.value = "";
+      applyAddFormCtxDefaults();
       setModelsStatus(`Добавлено: ${model}`, "ok");
       await refreshHealth();
     } catch (e) {
@@ -1174,6 +1269,7 @@
     if (meta.tier) chips.push(`<span class="chip accent">${escapeHtml(meta.tier)}</span>`);
     if (meta.model) chips.push(`<span class="chip">${escapeHtml(meta.model)}</span>`);
     if (meta.need_web) chips.push(`<span class="chip">web</span>`);
+    if (meta.need_local_time) chips.push(`<span class="chip">время ПК</span>`);
     if (meta.num_ctx) chips.push(`<span class="chip">ctx ${escapeHtml(meta.num_ctx)}</span>`);
     if (meta.used_history === false) chips.push(`<span class="chip">без истории</span>`);
     else if (meta.used_history === true) chips.push(`<span class="chip">история</span>`);
@@ -1368,6 +1464,7 @@
       if (ctx.liveMeta.tier) bits.push(ctx.liveMeta.tier);
       if (ctx.liveMeta.model) bits.push(ctx.liveMeta.model);
       if (ctx.liveMeta.need_web) bits.push("web");
+      if (ctx.liveMeta.need_local_time) bits.push("время ПК");
       if (ctx.liveMeta.num_ctx) bits.push("ctx " + ctx.liveMeta.num_ctx);
       if (ctx.liveMeta.used_history === false) bits.push("без истории");
       if (data.phase === "retry") bits.push("повтор");
@@ -1406,6 +1503,7 @@
         tier: data.tier,
         model: data.model,
         need_web: data.need_web,
+        need_local_time: data.need_local_time,
         route_reason: data.route_reason,
         escalated: data.escalated,
         attempts: data.attempts,
@@ -1424,6 +1522,7 @@
         data.tier,
         data.model,
         data.need_web ? "web" : null,
+        data.need_local_time ? "время ПК" : null,
         data.num_ctx ? `ctx ${data.num_ctx}` : null,
         data.used_history === false ? "без истории" : null,
         data.escalated ? "escalated" : null,
@@ -1563,6 +1662,7 @@
           els.addSlotRank.value = String(defaultRankFor(els.addSlotTier.value));
         }
       }
+      applyAddFormCtxDefaults();
     });
   }
   els.messages.addEventListener("click", (e) => {

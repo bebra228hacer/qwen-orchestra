@@ -183,15 +183,25 @@
           <label class="provider-opt"><input type="radio" name="add-provider" value="openrouter" /> OpenRouter</label>
         </div>
         <div class="add-slot-row">
+          <select id="add-slot-model" class="tier-select" title="Модель из Ollama"></select>
+          <input id="add-slot-model-or" class="text-input" type="text" placeholder="anthropic/claude-sonnet-4" title="ID модели OpenRouter" hidden />
           <div class="field-with-label tier-field">
             <label class="field-label" for="add-slot-tier">Тир</label>
             <select id="add-slot-tier" class="tier-select" title="Тир для Auto или без роутинга"></select>
           </div>
-          <select id="add-slot-model" class="tier-select" title="Модель из Ollama"></select>
-          <input id="add-slot-model-or" class="text-input" type="text" placeholder="anthropic/claude-sonnet-4" title="ID модели OpenRouter" hidden />
           <div class="field-with-label rank-field">
             <label class="field-label" for="add-slot-rank">Rank</label>
             <input id="add-slot-rank" class="text-input rank-input" type="number" value="3" min="0" max="9" title="Сила / порядок эскалации" />
+          </div>
+        </div>
+        <div class="add-slot-row add-slot-ctx-row">
+          <div class="field-with-label ctx-oh-field">
+            <label class="field-label" for="add-slot-ctx-oh">Запас ctx %</label>
+            <input id="add-slot-ctx-oh" class="text-input rank-input" type="number" value="0" min="0" max="900" title="0 = минимум; 300 = база×4" />
+          </div>
+          <div class="field-with-label ctx-max-field">
+            <label class="field-label" for="add-slot-max-ctx">max ctx</label>
+            <input id="add-slot-max-ctx" class="text-input rank-input" type="number" min="256" max="32768" step="256" placeholder="8192" title="Потолок num_ctx (пусто = 8192)" />
           </div>
         </div>
         <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Промпт для роутера (когда выбирать)…"></textarea>

@@ -81,6 +81,8 @@ class AddModelBody(BaseModel):
     id: str | None = None
     rank: int | None = None
     provider: str = "ollama"
+    ctx_overhead_pct: int | None = None
+    max_ctx: int | None = None
 
 
 # Совместимость со старым именем
@@ -124,6 +126,7 @@ def _result_meta(result: Any) -> dict[str, Any]:
         "tier": result.tier,
         "model": result.model,
         "need_web": result.need_web,
+        "need_local_time": getattr(result, "need_local_time", False),
         "route_reason": result.route_reason,
         "escalated": result.escalated,
         "attempts": result.attempts,
@@ -256,6 +259,8 @@ def add_settings_model(body: AddModelBody) -> dict[str, Any]:
             tier=body.tier,
             rank=body.rank,
             provider=body.provider,
+            ctx_overhead_pct=body.ctx_overhead_pct,
+            max_ctx=body.max_ctx,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -424,6 +429,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "tier": payload.get("tier"),
                         "model": payload.get("model"),
                         "need_web": payload.get("need_web"),
+                        "need_local_time": payload.get("need_local_time"),
                         "route_reason": payload.get("reason"),
                         "ok": payload.get("ok"),
                     },
@@ -450,6 +456,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "tier": payload.get("tier"),
                         "model": payload.get("model"),
                         "need_web": payload.get("need_web"),
+                        "need_local_time": payload.get("need_local_time"),
                         "phase": "worker",
                         "num_ctx": payload.get("num_ctx"),
                         "used_history": payload.get("used_history"),

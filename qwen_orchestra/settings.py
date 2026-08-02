@@ -229,6 +229,34 @@ _DEFAULT_POOL_SPEC: list[tuple[str, str, str, int]] = [
     ("frontier", "qwen2.5:14b", "frontier · топ / внешний", 8),
 ]
 
+# Запас ctx % по тиру (300 → база×4). Тяжёлые — 0 (минимум VRAM).
+DEFAULT_CTX_OVERHEAD_PCT: dict[str, int] = {
+    "tiny": 300,
+    "nano": 200,
+    "small": 100,
+    "mid": 50,
+    "large": 0,
+    "heavy": 0,
+    "xlarge": 0,
+    "coder": 0,
+    "ultra": 0,
+    "frontier": 0,
+}
+
+# Потолок для мелких моделей с большим запасом (None → глобальный 8192).
+DEFAULT_MAX_CTX: dict[str, int | None] = {
+    "tiny": 4096,
+    "nano": 4096,
+    "small": 4096,
+    "mid": None,
+    "large": None,
+    "heavy": None,
+    "xlarge": None,
+    "coder": None,
+    "ultra": None,
+    "frontier": None,
+}
+
 DEFAULT_ROUTER_MODEL = "qwen3.5:0.8b"
 
 ROUTER_SYSTEM_HEADER = """Ты роутер запросов. Отвечай ТОЛЬКО валидным JSON без markdown.
@@ -253,6 +281,48 @@ ROUTER_SYSTEM_FOOTER = """
 """
 
 
+CTX_OVERHEAD_PCT_MAX = 900
+MAX_CTX_ABS_MIN = 256
+MAX_CTX_ABS_MAX = 32768
+
+
+def _normalize_ctx_overhead_pct(raw: Any) -> int:
+    if raw is None or str(raw).strip() == "":
+        return 0
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(CTX_OVERHEAD_PCT_MAX, n))
+
+
+def _normalize_max_ctx(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        n = int(s)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return max(MAX_CTX_ABS_MIN, min(MAX_CTX_ABS_MAX, n))
+
+
+def default_ctx_overhead_for_tier(tier: str | None) -> int:
+    if not tier:
+        return 0
+    return int(DEFAULT_CTX_OVERHEAD_PCT.get(str(tier).strip().lower(), 0))
+
+
+def default_max_ctx_for_tier(tier: str | None) -> int | None:
+    if not tier:
+        return None
+    return DEFAULT_MAX_CTX.get(str(tier).strip().lower())
+
+
 @dataclass
 class PoolModel:
     """Запись пула: модель + опциональный тир для Auto."""
@@ -264,6 +334,8 @@ class PoolModel:
     router_prompt: str
     tier: str | None = None
     rank: int | None = None
+    ctx_overhead_pct: int = 0  # 0…900; 300 → база×4
+    max_ctx: int | None = None  # None → глобальный NUM_CTX_MAX
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -385,6 +457,14 @@ def _pool_from_dict(raw: dict[str, Any], *, used_ids: set[str] | None = None) ->
             )
         else:
             prompt = f"Модель `{model}` — только ручной выбор (вне Auto)."
+    if "ctx_overhead_pct" in raw:
+        ctx_oh = _normalize_ctx_overhead_pct(raw.get("ctx_overhead_pct"))
+    else:
+        ctx_oh = default_ctx_overhead_for_tier(tier)
+    if "max_ctx" in raw:
+        max_c = _normalize_max_ctx(raw.get("max_ctx"))
+    else:
+        max_c = default_max_ctx_for_tier(tier)
     return PoolModel(
         id=pid,
         model=model,
@@ -393,6 +473,8 @@ def _pool_from_dict(raw: dict[str, Any], *, used_ids: set[str] | None = None) ->
         router_prompt=prompt,
         tier=tier,
         rank=rank,
+        ctx_overhead_pct=ctx_oh,
+        max_ctx=max_c,
     )
 
 
@@ -410,6 +492,8 @@ def _default_pool() -> list[PoolModel]:
                     "tier": tier,
                     "rank": rank,
                     "router_prompt": DEFAULT_ROUTER_PROMPTS[tier],
+                    "ctx_overhead_pct": default_ctx_overhead_for_tier(tier),
+                    "max_ctx": default_max_ctx_for_tier(tier),
                 },
                 used_ids=None,
             )
@@ -441,17 +525,20 @@ def _slots_to_pool(raw_slots: list[Any]) -> list[dict[str, Any]]:
             # фактически все с tier в routing. Оставляем tier.
             pass
         pid = make_pool_id(provider, model, used=used)
-        out.append(
-            {
-                "id": pid,
-                "model": model,
-                "provider": provider,
-                "label": item.get("label") or model,
-                "router_prompt": item.get("router_prompt"),
-                "tier": tier if tier in FIXED_TIERS else None,
-                "rank": item.get("rank"),
-            }
-        )
+        entry: dict[str, Any] = {
+            "id": pid,
+            "model": model,
+            "provider": provider,
+            "label": item.get("label") or model,
+            "router_prompt": item.get("router_prompt"),
+            "tier": tier if tier in FIXED_TIERS else None,
+            "rank": item.get("rank"),
+        }
+        if "ctx_overhead_pct" in item:
+            entry["ctx_overhead_pct"] = item.get("ctx_overhead_pct")
+        if "max_ctx" in item:
+            entry["max_ctx"] = item.get("max_ctx")
+        out.append(entry)
     return out
 
 
@@ -670,7 +757,13 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
         # compat для старого UI на один релиз
         "slots": [m.to_dict() for m in s.models],
         "fixed_tiers": [
-            {"id": tid, "rank": r, "label": lab}
+            {
+                "id": tid,
+                "rank": r,
+                "label": lab,
+                "ctx_overhead_pct": default_ctx_overhead_for_tier(tid),
+                "max_ctx": default_max_ctx_for_tier(tid),
+            }
             for tid, _m, lab, r in _DEFAULT_POOL_SPEC
         ],
         "defaults": {
@@ -696,6 +789,8 @@ def add_model(
     rank: int | None = None,
     provider: str = "ollama",
     model_id: str | None = None,
+    ctx_overhead_pct: int | None = None,
+    max_ctx: int | None = None,
 ) -> AppSettings:
     """Добавить модель в пул (или обновить по id)."""
     s = get_settings()
@@ -730,6 +825,20 @@ def add_model(
         or (existing.router_prompt if existing else ""),
         "tier": tid,
         "rank": rank if tid is not None else None,
+        "ctx_overhead_pct": (
+            ctx_overhead_pct
+            if ctx_overhead_pct is not None
+            else (
+                existing.ctx_overhead_pct
+                if existing
+                else default_ctx_overhead_for_tier(tid)
+            )
+        ),
+        "max_ctx": (
+            max_ctx
+            if max_ctx is not None
+            else (existing.max_ctx if existing else default_max_ctx_for_tier(tid))
+        ),
     }
     entry = _pool_from_dict(raw)
     if existing:

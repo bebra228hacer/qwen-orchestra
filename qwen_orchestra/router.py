@@ -85,6 +85,7 @@ class RouteDecision:
     need_web: bool
     reason: str
     reply: str = ""
+    need_local_time: bool = False
 
 
 _WEB_KEYS = (
@@ -92,8 +93,6 @@ _WEB_KEYS = (
     "новост",
     "курс доллар",
     "курс евро",
-    "сегодня",
-    "сколько сейчас",
     "актуальн",
     "weather",
     "news",
@@ -111,6 +110,35 @@ _WEB_KEYS = (
     "search the web",
     "search online",
 )
+
+# Классификатор tiny: нужно ли подставить часы/дату с ПК (без regex-гейтов)
+_LOCAL_TIME_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "need_local_time": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["need_local_time"],
+}
+
+_LOCAL_TIME_SYSTEM = """Ты классификатор. Реши, подставить ли в контекст точные
+текущие дату и время с компьютера пользователя (локальные часы ОС).
+
+need_local_time=true при ЛЮБОМ упоминании времени, даты или связанных понятий —
+даже если для ответа часы могут не понадобиться. Включая:
+- час, время, дата, день недели, календарь, срок, дедлайн
+- сейчас / сегодня / вчера / завтра / утром / вечером / ночью
+- который час, сколько времени, какая дата
+- timezone / часовой пояс / UTC
+- сленг и опечатки («скок щя», «щас», «what time»)
+- любое «когда» в смысле момента времени относительно «сейчас»
+
+need_local_time=false ТОЛЬКО если в запросе нет ни времени, ни даты, ни
+временных маркеров (чисто код, перевод, факты без «сейчас/сегодня», приветствие).
+
+Сомневаешься — ставь true.
+
+Ответь ТОЛЬКО JSON: {"need_local_time": bool, "reason": "кратко"}."""
 
 # Короткие EN-приветствия только как целые слова (иначе hi ⊂ this/history)
 _TINY_WORD_RE = re.compile(
@@ -252,13 +280,14 @@ _BRIEF_RE = re.compile(
 )
 
 # 0.5b любит ставить need_web без причины; её «да» принимаем только при этих признаках
+# (чистое «сколько сейчас времени» / «сегодня какая дата» — local time, не web)
 _SOFT_WEB_RE = re.compile(
     r"(?:"
     r"последн|нов(?:ый|ая|ое|ые|ости)|верси(?:я|и|ю)|релиз|стоимост|"
-    r"\bкурс\b|когда\s+(?:будет|выйдет|откро|закры|выходит|релиз)|дата\b|кто такой|"
-    r"рейтинг|статистик|прогноз|расписани|сколько сейчас|"
+    r"\bкурс\b|когда\s+(?:будет|выйдет|откро|закры|выходит|релиз)|кто такой|"
+    r"рейтинг|статистик|прогноз|расписани|"
     r"поищи|погугли|найди\s+в\s+(?:интернет|сети)|look\s+up|search\s+(?:the\s+)?(?:web|online)|"
-    r"цена\b"
+    r"цена\b|погода|weather"
     r")",
     re.IGNORECASE,
 )
@@ -343,6 +372,42 @@ def _extract_json(text: str) -> dict | None:
 def _looks_web(user_text: str) -> bool:
     t = user_text.strip().lower()
     return any(k in t for k in _WEB_KEYS) or bool(_SOFT_WEB_RE.search(t))
+
+
+def _ask_local_time(model: str, user_text: str, *, timeout: int = 60) -> bool | None:
+    """Tiny/small: нужна ли дата/время с ПК. None — сбой вызова."""
+    messages = [
+        {"role": "system", "content": _LOCAL_TIME_SYSTEM},
+        {"role": "user", "content": user_text},
+    ]
+    try:
+        msg = chat(
+            model,
+            messages,
+            fmt=_LOCAL_TIME_SCHEMA,
+            temperature=0.0,
+            num_ctx=1024,
+            keep_alive="10m",
+            timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    data = _extract_json(msg.get("content") or "")
+    if not data:
+        return None
+    return bool(data.get("need_local_time", False))
+
+
+def need_local_time(user_text: str) -> bool:
+    """Нужны ли локальные часы ПК — решает только модель-роутер (tiny), без regex."""
+    t = (user_text or "").strip()
+    if len(t) < 2 or not _ALNUM_RE.search(t):
+        return False
+    ask_model = _resolve_local_router_model(ROUTE_MODEL)
+    if not ask_model:
+        return False
+    decided = _ask_local_time(ask_model, t)
+    return bool(decided)
 
 
 def need_web(user_text: str) -> bool:
@@ -537,12 +602,21 @@ def _heuristic(user_text: str) -> RouteDecision:
     """Запасной роут, если роутер-модель вернула мусор."""
     t = user_text.strip()
     if len(t) < 2:
-        return RouteDecision(False, "tiny", False, "too short", "Напишите вопрос чуть подробнее.")
+        return RouteDecision(
+            False, "tiny", False, "too short", "Напишите вопрос чуть подробнее."
+        )
 
-    if _looks_tiny(t):
+    local = need_local_time(t)
+    if _looks_tiny(t) and not local:
         return RouteDecision(True, "tiny", False, "heuristic:greeting", "")
 
-    return RouteDecision(True, tier_floor(t), _looks_web(t), "heuristic:floor", "")
+    return RouteDecision(
+        True,
+        tier_floor(t),
+        _looks_web(t),
+        "heuristic:floor",
+        need_local_time=local,
+    )
 
 
 def _ask_router(model: str, user_text: str, *, timeout: int) -> dict | None:
@@ -593,24 +667,56 @@ def route(user_text: str) -> RouteDecision:
     floor = tier_floor(user_text)
     web = need_web(user_text)
 
-    # Жёсткие лёгкие кейсы — не спрашиваем 0.5b
+    # Жёсткие лёгкие кейсы — не спрашиваем модели
     if floor == "tiny" and _looks_tiny(user_text):
         reply = _tiny_shortcut_reply(user_text)
         if reply:
             return RouteDecision(True, "tiny", False, "tiny-shortcut", reply)
 
-    # Свежие данные — без LLM; mid+ с учётом floor
+    # Нужны ли часы ПК — только решение tiny (отдельный вызов)
+    local = need_local_time(user_text)
+
+    # Свежие данные — без LLM-роутера; mid+ с учётом floor
     if web:
-        return RouteDecision(True, _tier_max("mid", floor), True, "web-shortcut", "")
+        return RouteDecision(
+            True,
+            _tier_max("mid", floor),
+            True,
+            "web-shortcut",
+            "",
+            need_local_time=local,
+        )
     if floor == "coder":
-        return RouteDecision(True, "coder", False, "floor:coder", "")
+        return RouteDecision(
+            True, "coder", False, "floor:coder", "", need_local_time=local
+        )
     if floor == "xlarge":
-        return RouteDecision(True, "xlarge", False, "floor:xlarge", "")
+        return RouteDecision(
+            True, "xlarge", False, "floor:xlarge", "", need_local_time=local
+        )
     # mid/heavy без расширенного auto — детерминированно (экономия VRAM)
     if floor == "heavy" and not _has_extra_auto():
-        return RouteDecision(True, "heavy", False, "floor:heavy", "")
+        return RouteDecision(
+            True, "heavy", False, "floor:heavy", "", need_local_time=local
+        )
     if floor == "mid" and not _has_extra_auto():
-        return RouteDecision(True, _clamp("mid", user_text), False, "floor:mid", "")
+        return RouteDecision(
+            True,
+            _clamp("mid", user_text),
+            False,
+            "floor:mid",
+            "",
+            need_local_time=local,
+        )
+    if local and not _has_extra_auto():
+        return RouteDecision(
+            True,
+            _clamp(floor, user_text),
+            False,
+            "local-time",
+            "",
+            need_local_time=True,
+        )
 
     ask_model = _resolve_local_router_model(ROUTE_MODEL)
     if not ask_model:
@@ -665,4 +771,6 @@ def route(user_text: str) -> RouteDecision:
     if tier != "tiny":
         reply = ""
 
-    return RouteDecision(ok, tier, need, reason or f"floor:{floor}", reply)
+    return RouteDecision(
+        ok, tier, need, reason or f"floor:{floor}", reply, need_local_time=local
+    )

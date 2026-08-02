@@ -10,6 +10,7 @@ from qwen_orchestra.router import (  # noqa: F401
     RouteDecision,
     Tier,
     looks_meaningful,
+    need_local_time,
     need_web,
     route,
     tier_ceiling,

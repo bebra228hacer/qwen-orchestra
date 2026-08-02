@@ -153,6 +153,8 @@ class Client:
         tier: str | None = None,
         rank: int | None = None,
         provider: str = "ollama",
+        ctx_overhead_pct: int | None = None,
+        max_ctx: int | None = None,
     ) -> dict[str, Any]:
         """Добавить или обновить модель в пуле."""
         app_settings.ensure_bootstrapped()
@@ -164,6 +166,8 @@ class Client:
             tier=tier,
             rank=rank,
             provider=provider,
+            ctx_overhead_pct=ctx_overhead_pct,
+            max_ctx=max_ctx,
         )
         return app_settings.public_settings_payload()
 

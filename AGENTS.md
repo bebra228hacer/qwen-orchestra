@@ -39,6 +39,7 @@
 | `qwen_orchestra/llm.py` | Клиент Ollama + OpenRouter (`provider`, `think: false` для Qwen3.5) |
 | `qwen_orchestra/metrics.py` | CPU/RAM/GPU/температуры + Ollama `/api/ps` |
 | `qwen_orchestra/tools_web.py` | `web_search`, `fetch_url` |
+| `qwen_orchestra/tools_local.py` | локальные данные ПК: `get_local_time`, снимок даты/времени |
 | `orchestra.py` / `router.py` / … | Shim-модули для старых импортов |
 | `orchestra_chat.py` | CLI оркестра |
 | `ask_orchestra.py` | Один вопрос через оркестр |
@@ -75,7 +76,7 @@ Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не пр�
 
 ### Пул моделей и OpenRouter
 
-- В UI «Модели и промпты»: пул записей (provider + model + label + prompt + опционально tier/rank).
+- В UI «Модели и промпты»: пул записей (provider + model + prompt + опционально tier/rank + запас ctx % / max ctx).
 - **`tier` задан** → Auto и эскалация; несколько моделей на один тир — ответ с max rank.
 - **`tier` пуст** → только ручной выбор (`force_model`).
 - Поле `provider`: `ollama` (default) | `openrouter`.
@@ -103,7 +104,7 @@ user → route → plan context → worker (± web tools) → selfcheck
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
 - События `on_status`: `route`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`.
 - `force_model` — id записи пула; `force_tier` — лучшая available-модель тира (compat).
-- `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason` (метаданные — от **выбранной** попытки).
+- `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `need_local_time`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason` (метаданные — от **выбранной** попытки).
 
 ## Auto-режим: когда какая модель
 
@@ -132,6 +133,10 @@ user → route → plan context → worker (± web tools) → selfcheck
   floor `mid`/`heavy`/`coder`. tiny остаётся для неоднозначных коротких запросов.
 - `need_web` — детерминированно (`need_web()` / hard+soft ключи, в т.ч. «поищи»,
   «погугли»); при `force_tier` / `force_model` LLM-роутер **не** вызывается.
+- `need_local_time` — только решение tiny (`need_local_time()` / JSON-классификатор),
+  без regex. Критерий широкий: любое упоминание времени/даты/«сейчас» → true
+  (даже если часы могут не пригодиться). При true в system воркера — снимок
+  часов/даты/TZ с ПК (`tools_local`); чип UI «время ПК».
 - `ok=false` от tiny **игнорируется**, если запрос осмысленный (`looks_meaningful`):
   есть слова с гласными или простая арифметика. Пустой ввод и «??» отклоняются сразу,
   мусор — после второго мнения mid (4b).
@@ -144,14 +149,13 @@ user → route → plan context → worker (± web tools) → selfcheck
 Перед воркером `plan_worker_context()` (все тиры; для heavy/xlarge/coder строже с историей):
 
 1. **Приоритет** — текущий запрос целиком (не обрезать system + user).
-2. **Второй** — минимальный `num_ctx` / VRAM.
+2. **Второй** — минимальный `num_ctx` / VRAM (с опциональным запасом per-модель).
 
-Формула (токены):
+База (токены):
 
 ```
-num_ctx = min(8192, max(256, ceil_256(
-  tokens(промпт) + template(128) + reserve_ответа + safety
-)))
+base = ceil_256(tokens(промпт) + template(128) + reserve_ответа + safety)
+num_ctx = min(ceiling, max(256, ceil_256(base * (1 + ctx_overhead_pct/100))))
 ```
 
 | Кусок | Значение |
@@ -161,6 +165,13 @@ num_ctx = min(8192, max(256, ceil_256(
 | `reserve_ответа` | 512 короткий (< 48 символов) / 768 обычный / 1536 код (`coder` или признаки кода) |
 | `safety` | `max(128, ~10% от суммы трёх кусков выше)` |
 | `ceil_256` | выравнивание как в llama.cpp |
+| `ctx_overhead_pct` | поле записи пула `0…900`; `0` = как база; `300` → база×4 |
+| `ceiling` | `max_ctx` модели или глобальный `8192` (`NUM_CTX_MAX`); clamp [256…8192] |
+
+Per-model в `models[]` / UI «Модели и промпты»: **Запас ctx %** и опциональный **max ctx**.
+Defaults по тиру: tiny `300` / nano `200` / small `100` / mid `50` / large+ `0`;
+max ctx tiny/nano/small `4096`, остальные без потолка (8192). Сброс пула подтягивает эти значения.
+При эскалации берётся запас **текущей** записи пула.
 
 История:
 
@@ -170,6 +181,7 @@ num_ctx = min(8192, max(256, ceil_256(
 - самодостаточный длинный текст / блок кода → без истории.
 
 Константы в `orchestra.py`: `CTX_TEMPLATE_TOKENS`, `CTX_OUT_*`, `CTX_SAFETY_FLAT`, `NUM_CTX_MAX`.
+В `context_reason` при ненулевом запасе — `+ctx×{factor}`.
 
 Событие `context` / SSE `meta.phase=context`: `used_history`, `num_ctx`, `context_reason`, `history_messages`.  
 В `done` и чипах UI: `ctx N`, `без истории` / `история`.
@@ -296,7 +308,8 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 3. Новые проверки ответа — в `qwen_orchestra/selfcheck.py` (код проблемы + текст в `HINTS`);
    жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling`;
    тексты «когда модель» для LLM-роутера и пул моделей — в `settings.py` / UI;
-   размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`.
+   размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`;
+   локальные данные ПК — в `tools_local.py` + детектор в `router.need_local_time`.
 4. Лаунчер readiness — только `/api/ready`; тяжёлые проверки Ollama — в `/api/health`.
 5. Не слушать `0.0.0.0` без явной просьбы пользователя.
 6. Не добавлять светлую тему / аккаунты / IDE без запроса.

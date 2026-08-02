@@ -21,9 +21,14 @@ from typing import Any, Callable
 from . import selfcheck
 from . import settings as app_settings
 from .llm import chat, chat_stream, installed_models
-from .router import ALL_TIERS, TIER_ORDER, TIER_RANK, RouteDecision, Tier, need_web, route
+from .router import ALL_TIERS, TIER_ORDER, TIER_RANK, RouteDecision, Tier, need_local_time, need_web, route
 from .selfcheck import Verdict
+from .tools_local import TOOL_IMPL_LOCAL, TOOLS_LOCAL, local_context_block
 from .tools_web import TOOL_IMPL, TOOLS
+
+# Web + локальные tools в одном пуле для Ollama tool-calling
+_ALL_TOOLS = list(TOOLS) + list(TOOLS_LOCAL)
+_ALL_TOOL_IMPL = {**TOOL_IMPL, **TOOL_IMPL_LOCAL}
 
 MODELS: dict[str, str] = {
     "tiny": "qwen3.5:0.8b",
@@ -214,6 +219,7 @@ class OrchestraResult:
     num_ctx: int = NUM_CTX_FULL
     used_history: bool = True
     context_reason: str = ""
+    need_local_time: bool = False
 
 
 def _provider_of(tier: str, providers: dict[str, str] | None = None) -> str:
@@ -348,10 +354,15 @@ def _run_tool(name: str, arguments) -> str:
         try:
             arguments = json.loads(arguments) if arguments.strip() else {}
         except json.JSONDecodeError:
-            arguments = {"query": arguments} if name == "web_search" else {"url": arguments}
+            if name == "web_search":
+                arguments = {"query": arguments}
+            elif name == "fetch_url":
+                arguments = {"url": arguments}
+            else:
+                arguments = {}
     if not isinstance(arguments, dict):
         arguments = {}
-    impl = TOOL_IMPL.get(name)
+    impl = _ALL_TOOL_IMPL.get(name)
     if not impl:
         return f"Неизвестный инструмент: {name}"
     return impl(arguments)
@@ -447,10 +458,30 @@ def _trim_history_to_fit(
     return kept
 
 
+def _apply_ctx_scale(
+    base_ctx: int,
+    *,
+    ctx_overhead_pct: int = 0,
+    max_ctx: int | None = None,
+) -> tuple[int, float]:
+    """Запас % поверх базы → ceil_256, clamp [MIN…ceiling]. Возвращает (num_ctx, factor)."""
+    pct = max(0, int(ctx_overhead_pct or 0))
+    factor = 1.0 + pct / 100.0
+    ceiling = NUM_CTX_MAX if not max_ctx else int(max_ctx)
+    ceiling = min(NUM_CTX_MAX, max(NUM_CTX_MIN, ceiling))
+    scaled = _ceil_align(int(base_ctx * factor))
+    return min(ceiling, max(NUM_CTX_MIN, scaled)), factor
+
+
 def plan_worker_context(
-    user_text: str, history: list[dict], tier: Tier
+    user_text: str,
+    history: list[dict],
+    tier: Tier,
+    *,
+    ctx_overhead_pct: int = 0,
+    max_ctx: int | None = None,
 ) -> ContextPlan:
-    """История и num_ctx: 1) не обрезать запрос 2) минимальный ctx / VRAM."""
+    """История и num_ctx: 1) не обрезать запрос 2) минимальный ctx / VRAM (+ запас модели)."""
     hist = [
         h
         for h in (history or [])
@@ -461,11 +492,18 @@ def plan_worker_context(
     if tier not in _COMPLEX_TIERS:
         hist = _trim_history_to_fit(user_text, hist[-HISTORY_FULL:], out_reserve=out_res)
         prompt_tok = _prompt_tokens(user_text, hist)
+        base = _min_num_ctx(prompt_tok, out_res)
+        ctx, factor = _apply_ctx_scale(
+            base, ctx_overhead_pct=ctx_overhead_pct, max_ctx=max_ctx
+        )
+        reason = "light-tier"
+        if factor != 1.0:
+            reason = f"{reason}+ctx×{factor:.2f}"
         return ContextPlan(
             history=hist,
-            num_ctx=_min_num_ctx(prompt_tok, out_res),
+            num_ctx=ctx,
             use_history=bool(hist),
-            reason="light-tier",
+            reason=reason,
         )
 
     use, why = needs_chat_history(user_text, hist)
@@ -478,9 +516,15 @@ def plan_worker_context(
         hist = []
 
     prompt_tok = _prompt_tokens(user_text, hist)
-    ctx = _min_num_ctx(prompt_tok, out_res)
-    if ctx >= NUM_CTX_MAX and prompt_tok + CTX_TEMPLATE_TOKENS + out_res + CTX_SAFETY_FLAT > NUM_CTX_MAX:
+    base = _min_num_ctx(prompt_tok, out_res)
+    ctx, factor = _apply_ctx_scale(
+        base, ctx_overhead_pct=ctx_overhead_pct, max_ctx=max_ctx
+    )
+    ceiling = NUM_CTX_MAX if not max_ctx else min(NUM_CTX_MAX, max(NUM_CTX_MIN, int(max_ctx)))
+    if ctx >= ceiling and prompt_tok + CTX_TEMPLATE_TOKENS + out_res + CTX_SAFETY_FLAT > ceiling:
         why = f"{why}+ctx-max"
+    if factor != 1.0:
+        why = f"{why}+ctx×{factor:.2f}"
 
     return ContextPlan(
         history=hist,
@@ -501,11 +545,17 @@ def _fallback_tools(content: str) -> list[dict]:
 
 
 def _build_messages(
-    user_text: str, history: list[dict], retry_hint: str | None
+    user_text: str,
+    history: list[dict],
+    retry_hint: str | None,
+    *,
+    local_context: str | None = None,
 ) -> list[dict]:
     system = WORKER_SYSTEM
+    if local_context:
+        system = f"{system}\n\n{local_context}"
     if retry_hint:
-        system = f"{WORKER_SYSTEM}\n\n{RETRY_SYSTEM.format(hint=retry_hint)}"
+        system = f"{system}\n\n{RETRY_SYSTEM.format(hint=retry_hint)}"
     messages: list[dict] = [{"role": "system", "content": system}]
     for h in history:
         if h.get("role") in {"user", "assistant"}:
@@ -525,6 +575,7 @@ def _worker_with_tools(
     num_ctx: int = NUM_CTX_FULL,
     tool_cache: dict[str, str] | None = None,
     provider: str = "ollama",
+    local_context: str | None = None,
 ) -> str:
     if provider != "ollama":
         # MVP: tools только через Ollama
@@ -537,8 +588,11 @@ def _worker_with_tools(
             retry_hint=retry_hint,
             num_ctx=num_ctx,
             provider=provider,
+            local_context=local_context,
         )
-    messages = _build_messages(user_text, history, retry_hint)
+    messages = _build_messages(
+        user_text, history, retry_hint, local_context=local_context
+    )
     cache = tool_cache if tool_cache is not None else {}
     calls_done = 0
     # Бюджет в символах из остатка токенов окна (оценка ~2 символа/токен)
@@ -558,7 +612,7 @@ def _worker_with_tools(
         msg = chat(
             model,
             messages,
-            tools=TOOLS,
+            tools=_ALL_TOOLS,
             temperature=0.3,
             num_ctx=num_ctx,
             keep_alive="10m",
@@ -583,7 +637,12 @@ def _worker_with_tools(
                 try:
                     args = json.loads(args) if args.strip() else {}
                 except json.JSONDecodeError:
-                    args = {"query": args} if name == "web_search" else {"url": args}
+                    if name == "web_search":
+                        args = {"query": args}
+                    elif name == "fetch_url":
+                        args = {"url": args}
+                    else:
+                        args = {}
             if not isinstance(args, dict):
                 args = {}
             key = _tool_cache_key(name, args)
@@ -624,8 +683,11 @@ def _worker_plain(
     retry_hint: str | None = None,
     num_ctx: int = NUM_CTX_FULL,
     provider: str = "ollama",
+    local_context: str | None = None,
 ) -> str:
-    messages = _build_messages(user_text, history, retry_hint)
+    messages = _build_messages(
+        user_text, history, retry_hint, local_context=local_context
+    )
 
     if stream:
         return chat_stream(
@@ -683,12 +745,13 @@ def _cli_status_printer(verbose: bool) -> StatusCallback:
             )
         elif event == "worker":
             web = " + web" if payload.get("need_web") else ""
+            local = " + time" if payload.get("need_local_time") else ""
             attempt = payload.get("attempt") or 1
             suffix = f" (попытка {attempt})" if attempt > 1 else ""
             ctx = payload.get("num_ctx")
             hist = "hist" if payload.get("used_history") else "no-hist"
             ctx_s = f" ctx={ctx} {hist}" if ctx else ""
-            print(f"  [worker] {payload.get('model')}{web}{suffix}{ctx_s}", flush=True)
+            print(f"  [worker] {payload.get('model')}{web}{local}{suffix}{ctx_s}", flush=True)
         elif event == "context":
             hist = "история" if payload.get("used_history") else "без истории"
             print(
@@ -783,6 +846,7 @@ def handle(
             need_web=need_web(user_text),
             reason=f"forced_model:{force_model}",
             reply="",
+            need_local_time=need_local_time(user_text),
         )
     elif force_tier:
         if force_tier not in ALL_TIERS:
@@ -799,6 +863,7 @@ def handle(
             need_web=need_web(user_text),
             reason=f"forced:{force_tier}",
             reply="",
+            need_local_time=need_local_time(user_text),
         )
     else:
         if not available:
@@ -817,6 +882,7 @@ def handle(
                     decision.need_web,
                     f"{decision.reason}+fit:{fitted}",
                     decision.reply if fitted == "tiny" else "",
+                    need_local_time=decision.need_local_time,
                 )
 
     def _resolve_entry(tier: Tier) -> dict[str, Any]:
@@ -851,6 +917,7 @@ def handle(
         ok=decision.ok,
         tier=decision.tier,
         need_web=decision.need_web,
+        need_local_time=decision.need_local_time,
         reason=decision.reason,
         model=start_model_name,
         pool_id=start_entry.get("id"),
@@ -870,6 +937,7 @@ def handle(
             need_web=False,
             route_reason=decision.reason,
             checked=False,
+            need_local_time=False,
         )
 
     start_tier: Tier = decision.tier
@@ -919,6 +987,7 @@ def handle(
                 attempts=1,
                 checked=verdict.checked,
                 problems=list(verdict.problems),
+                need_local_time=decision.need_local_time,
             )
         mid = _fit_tier("mid", available)
         mid_entry = _resolve_entry(mid)
@@ -932,7 +1001,12 @@ def handle(
         )
         retry_hint = verdict.hint
         decision = RouteDecision(
-            True, mid, decision.need_web, decision.reason + " +recheck", ""
+            True,
+            mid,
+            decision.need_web,
+            decision.reason + " +recheck",
+            "",
+            need_local_time=decision.need_local_time,
         )
         lock_forced = False
 
@@ -943,7 +1017,22 @@ def handle(
     )
     tier: Tier = str(current_entry.get("tier") or decision.tier)
     tool_cache: dict[str, str] = {}
-    ctx_plan = plan_worker_context(user_text, history, tier)
+    local_ctx = local_context_block() if decision.need_local_time else None
+
+    def _ctx_kwargs(entry: dict[str, Any]) -> dict[str, Any]:
+        pct = entry.get("ctx_overhead_pct")
+        try:
+            pct_i = int(pct) if pct is not None else 0
+        except (TypeError, ValueError):
+            pct_i = 0
+        raw_max = entry.get("max_ctx")
+        try:
+            max_i = int(raw_max) if raw_max not in (None, "") else None
+        except (TypeError, ValueError):
+            max_i = None
+        return {"ctx_overhead_pct": pct_i, "max_ctx": max_i}
+
+    ctx_plan = plan_worker_context(user_text, history, tier, **_ctx_kwargs(current_entry))
     _emit_context(on_status, ctx_plan, tier)
     attempt_base = len(attempts)
 
@@ -953,7 +1042,9 @@ def handle(
         tier = str(current_entry.get("tier") or tier)
         attempt_no = attempt_base + attempt
         if attempt > 1:
-            ctx_plan = plan_worker_context(user_text, history, tier)
+            ctx_plan = plan_worker_context(
+                user_text, history, tier, **_ctx_kwargs(current_entry)
+            )
             _emit_context(on_status, ctx_plan, tier)
         _emit(
             on_status,
@@ -961,6 +1052,7 @@ def handle(
             model=model,
             provider=provider,
             need_web=decision.need_web,
+            need_local_time=decision.need_local_time,
             tier=tier,
             pool_id=current_entry.get("id"),
             attempt=attempt_no,
@@ -980,6 +1072,7 @@ def handle(
                 num_ctx=ctx_plan.num_ctx,
                 tool_cache=tool_cache,
                 provider=provider,
+                local_context=local_ctx,
             )
             _emit_token(on_token, text)
         else:
@@ -992,6 +1085,7 @@ def handle(
                 retry_hint=retry_hint,
                 num_ctx=ctx_plan.num_ctx,
                 provider=provider,
+                local_context=local_ctx,
             )
 
         review_model = _local_review_model(
@@ -1064,4 +1158,5 @@ def handle(
         num_ctx=best.ctx.num_ctx,
         used_history=best.ctx.use_history,
         context_reason=best.ctx.reason,
+        need_local_time=decision.need_local_time,
     )
