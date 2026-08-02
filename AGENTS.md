@@ -78,7 +78,7 @@ client.set_openrouter_api_key(...)  # secrets.json; None — очистить
 
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом (не в git).
-Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` + списки фраз; по умолчанию оба флага `true`.
+Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` / `flag_irrelevant` + списки фраз; по умолчанию все флаги `true`.
 Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не при голом импорте модулей.
 
 ### Пул моделей и OpenRouter
@@ -202,9 +202,10 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
    `refusal`, `uncertain`, `repetition` (зацикливание), `truncated` (незакрытый ```).
    `refusal` / `uncertain` **по умолчанию включены** (короткий ответ с «не могу» /
    «не знаю» → retry). Настройка в `settings.json` → `selfcheck` или UI «Модели и промпты»:
-   `flag_refusal` / `flag_uncertain` (bool) и опционально свои
+   `flag_refusal` / `flag_uncertain` / `flag_irrelevant` (bool) и опционально свои
    `refusal_patterns` / `uncertain_patterns` (список фраз; `null`/отсутствие = встроенные).
    При `flag_refusal=false` LLM-ревью тоже не бракует problem=`refusal`.
+   При `flag_irrelevant=false` — не бракует problem=`irrelevant`.
 2. **Арифметика** (`arithmetic_problems`): если в вопросе есть «сколько / посчитай /
    вычисли» и выражение, оно считается через `ast` и сверяется с ответом.
    Расхождение → `error`, а в `hint` уходит правильное значение. Совпало →

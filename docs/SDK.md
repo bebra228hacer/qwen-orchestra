@@ -319,6 +319,7 @@ client.update_settings(
     selfcheck={
         "flag_refusal": False,      # не браковать «не могу»
         "flag_uncertain": False,    # не браковать «не знаю»
+        "flag_irrelevant": False,   # не браковать LLM-вердикт «не по теме»
         # опционально свои фразы (null/отсутствие = встроенный список):
         # "refusal_patterns": ["не могу", "не смог", "i cannot"],
         # "uncertain_patterns": ["не знаю"],
@@ -331,7 +332,8 @@ client.update_settings(
 ```json
 "selfcheck": {
   "flag_refusal": true,
-  "flag_uncertain": true
+  "flag_uncertain": true,
+  "flag_irrelevant": true
 }
 ```
 

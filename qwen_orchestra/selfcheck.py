@@ -66,10 +66,11 @@ _UNCERTAIN_PATTERNS = DEFAULT_UNCERTAIN_PATTERNS
 
 @dataclass
 class SelfcheckRules:
-    """Правила быстрых проверок refusal/uncertain (из settings.json)."""
+    """Правила быстрых проверок + флаги LLM-вердиктов (из settings.json)."""
 
     flag_refusal: bool = True
     flag_uncertain: bool = True
+    flag_irrelevant: bool = True
     # None → встроенные DEFAULT_*; иначе свой список (пустой = не матчить)
     refusal_patterns: list[str] | None = None
     uncertain_patterns: list[str] | None = None
@@ -88,6 +89,7 @@ class SelfcheckRules:
         return {
             "flag_refusal": bool(self.flag_refusal),
             "flag_uncertain": bool(self.flag_uncertain),
+            "flag_irrelevant": bool(self.flag_irrelevant),
             "refusal_patterns": (
                 None if self.refusal_patterns is None else list(self.refusal_patterns)
             ),
@@ -107,6 +109,7 @@ def get_rules() -> SelfcheckRules:
     return SelfcheckRules(
         flag_refusal=_RULES.flag_refusal,
         flag_uncertain=_RULES.flag_uncertain,
+        flag_irrelevant=_RULES.flag_irrelevant,
         refusal_patterns=(
             None if _RULES.refusal_patterns is None else list(_RULES.refusal_patterns)
         ),
@@ -425,11 +428,15 @@ def llm_review(
     model: str = REVIEW_MODEL_DEFAULT,
     timeout: int = 180,
     flag_refusal: bool | None = None,
+    flag_irrelevant: bool | None = None,
 ) -> Verdict:
     """Ревью ответа отдельной моделью: ловит ошибки и уход от вопроса."""
     # Промпт ≤ ~3k токенов оценки — 4096 с запасом, без удержания полного 8k
     review_ctx = 4096
     allow_refusal = _RULES.flag_refusal if flag_refusal is None else bool(flag_refusal)
+    allow_irrelevant = (
+        _RULES.flag_irrelevant if flag_irrelevant is None else bool(flag_irrelevant)
+    )
     messages = [
         {"role": "system", "content": REVIEW_SYSTEM},
         {
@@ -458,8 +465,10 @@ def llm_review(
     problem = str(data.get("problem") or "error").strip()
     if problem in {"none", ""}:
         return Verdict(True, note="reviewed")
-    # Если refusal выключен в настройках — LLM-вердикт «refusal» не бракуем
+    # Если refusal/irrelevant выключены в настройках — LLM-вердикт не бракуем
     if problem == "refusal" and not allow_refusal:
+        return Verdict(True, note="reviewed")
+    if problem == "irrelevant" and not allow_irrelevant:
         return Verdict(True, note="reviewed")
     if problem not in HINTS:
         problem = "error"
@@ -493,7 +502,11 @@ def check(
 
     if use_llm and model and len(answer.strip()) >= 40:
         return llm_review(
-            user_text, answer, model=model, flag_refusal=cfg.flag_refusal
+            user_text,
+            answer,
+            model=model,
+            flag_refusal=cfg.flag_refusal,
+            flag_irrelevant=cfg.flag_irrelevant,
         )
 
     # Правила прошли, LLM не вызывали — для коротких ответов этого достаточно

@@ -31,7 +31,7 @@ result = client.ask(
 - Ключ OR: `OPENROUTER_API_KEY` или `client.set_openrouter_api_key`; не в git.
 - Не дублируй роутинг/selfcheck; не импортируй внутренности пакета без нужды.
 - Selfcheck по умолчанию бракует короткие «не могу»/«не знаю». В боте часто:
-  `update_settings(models, selfcheck={"flag_refusal": false, "flag_uncertain": false})`.
+  `update_settings(models, selfcheck={"flag_refusal": false, "flag_uncertain": false, "flag_irrelevant": false})`.
 
 ## Пул
 

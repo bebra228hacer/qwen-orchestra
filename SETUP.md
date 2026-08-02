@@ -116,7 +116,7 @@ print(result.text, result.tier, result.model, result.gen)
 
 Примеры: `examples/ask_sdk.py`, `examples/ask_sdk_bot.py` (Ollama + OpenRouter).  
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
-Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` и списки фраз — браковать ли короткие отказы («не могу») и неуверенность («не знаю»). По умолчанию оба включены; UI — «Модели и промпты».
+Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` / `flag_irrelevant` и списки фраз — браковать ли короткие отказы («не могу»), неуверенность («не знаю») и LLM-вердикт «не по теме». По умолчанию все включены; UI — «Модели и промпты».
 
 ---
 

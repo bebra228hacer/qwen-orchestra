@@ -22,6 +22,7 @@
     routerModelSelect: $("#router-model-select"),
     scFlagRefusal: $("#sc-flag-refusal"),
     scFlagUncertain: $("#sc-flag-uncertain"),
+    scFlagIrrelevant: $("#sc-flag-irrelevant"),
     scRefusalPatterns: $("#sc-refusal-patterns"),
     scUncertainPatterns: $("#sc-uncertain-patterns"),
     btnModelsSave: $("#btn-models-save"),
@@ -1022,6 +1023,9 @@
     if (els.scFlagUncertain) {
       els.scFlagUncertain.checked = cfg.flag_uncertain !== false;
     }
+    if (els.scFlagIrrelevant) {
+      els.scFlagIrrelevant.checked = cfg.flag_irrelevant !== false;
+    }
     if (els.scRefusalPatterns) {
       const list =
         cfg.refusal_patterns_effective ||
@@ -1069,6 +1073,7 @@
     return {
       flag_refusal: !!(els.scFlagRefusal && els.scFlagRefusal.checked),
       flag_uncertain: !!(els.scFlagUncertain && els.scFlagUncertain.checked),
+      flag_irrelevant: !!(els.scFlagIrrelevant && els.scFlagIrrelevant.checked),
       refusal_patterns: refusalOut,
       uncertain_patterns: uncertainOut,
     };

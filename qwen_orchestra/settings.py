@@ -351,14 +351,16 @@ ModelSlot = PoolModel
 
 @dataclass
 class SelfcheckSettings:
-    """Настройки самопроверки: отказы / неуверенность.
+    """Настройки самопроверки: отказы / неуверенность / «не по теме».
 
     По умолчанию бракуем короткие ответы с маркерами «не могу» / «не знаю»
-    (как раньше в коде). Можно выключить или задать свои фразы в settings.json.
+    (как раньше в коде) и LLM-вердикт irrelevant. Можно выключить или задать
+    свои фразы в settings.json.
     """
 
     flag_refusal: bool = True
     flag_uncertain: bool = True
+    flag_irrelevant: bool = True
     # None → встроенные паттерны из selfcheck; список → заменить (в т.ч. пустой)
     refusal_patterns: list[str] | None = None
     uncertain_patterns: list[str] | None = None
@@ -367,6 +369,7 @@ class SelfcheckSettings:
         out: dict[str, Any] = {
             "flag_refusal": bool(self.flag_refusal),
             "flag_uncertain": bool(self.flag_uncertain),
+            "flag_irrelevant": bool(self.flag_irrelevant),
         }
         if self.refusal_patterns is not None:
             out["refusal_patterns"] = list(self.refusal_patterns)
@@ -380,6 +383,7 @@ class SelfcheckSettings:
         return SelfcheckRules(
             flag_refusal=self.flag_refusal,
             flag_uncertain=self.flag_uncertain,
+            flag_irrelevant=self.flag_irrelevant,
             refusal_patterns=(
                 None if self.refusal_patterns is None else list(self.refusal_patterns)
             ),
@@ -420,9 +424,11 @@ def _selfcheck_from_dict(raw: Any) -> SelfcheckSettings:
         return default_selfcheck_settings()
     flag_refusal = raw.get("flag_refusal")
     flag_uncertain = raw.get("flag_uncertain")
+    flag_irrelevant = raw.get("flag_irrelevant")
     # Явные false/true; отсутствие → True (старое поведение)
     fr = True if flag_refusal is None else bool(flag_refusal)
     fu = True if flag_uncertain is None else bool(flag_uncertain)
+    fi = True if flag_irrelevant is None else bool(flag_irrelevant)
 
     def _patterns_field(key: str) -> list[str] | None:
         if key not in raw:
@@ -436,6 +442,7 @@ def _selfcheck_from_dict(raw: Any) -> SelfcheckSettings:
     return SelfcheckSettings(
         flag_refusal=fr,
         flag_uncertain=fu,
+        flag_irrelevant=fi,
         refusal_patterns=_patterns_field("refusal_patterns"),
         uncertain_patterns=_patterns_field("uncertain_patterns"),
     )

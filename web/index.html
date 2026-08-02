@@ -175,8 +175,9 @@
       <div class="selfcheck-settings" id="selfcheck-settings">
         <div class="field-label">Самопроверка ответа</div>
         <p class="modal-hint">
-          По умолчанию короткий отказ («не могу»…) или неуверенность («не знаю»…) бракуются
-          и запускают retry. Можно выключить или заменить список фраз (по одной на строку).
+          По умолчанию короткий отказ («не могу»…), неуверенность («не знаю»…)
+          или LLM-вердикт «не по теме» бракуются и запускают retry.
+          Можно выключить или заменить список фраз (по одной на строку).
         </p>
         <label class="selfcheck-opt">
           <input type="checkbox" id="sc-flag-refusal" checked />
@@ -192,6 +193,10 @@
         <textarea id="sc-uncertain-patterns" class="prompt-input" rows="2" spellcheck="false"
           placeholder="не знаю&#10;не уверен&#10;…"
           title="Фразы неуверенности, по одной на строку"></textarea>
+        <label class="selfcheck-opt">
+          <input type="checkbox" id="sc-flag-irrelevant" checked />
+          Браковать «не по теме» (irrelevant, LLM-ревью)
+        </label>
       </div>
       <p class="modal-hint">
         Пул моделей: укажите тир для Auto или оставьте «не участвует в роутинге».
