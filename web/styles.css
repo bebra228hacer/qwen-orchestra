@@ -977,6 +977,35 @@ input {
   gap: 4px;
 }
 
+.selfcheck-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.selfcheck-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.selfcheck-opt input {
+  margin: 0;
+}
+
+.selfcheck-settings .prompt-input {
+  font-size: 12px;
+  min-height: 0;
+}
+
 .modal-header h2 {
   margin: 0;
   font-size: 16px;

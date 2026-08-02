@@ -3,7 +3,8 @@
 Ловит типовые срывы локальных моделей:
   - ответ ушёл на другой язык (китайский/японский/корейский);
   - пустой, обрезанный или зацикленный текст;
-  - отказ («не могу», «как языковая модель») вместо ответа;
+  - отказ («не могу», «как языковая модель») вместо ответа —
+    по умолчанию включено; выключается/настраивается через settings.selfcheck;
   - явная ошибка или ответ не по вопросу (это уже проверяет LLM-ревьюер).
 
 Результат — `Verdict`: `ok`, список кодов проблем и `hint` — инструкция
@@ -31,7 +32,9 @@ _LOOP_RE = re.compile(r"(.{6,80}?)\1{3,}", re.DOTALL)
 _WORD_RE = re.compile(r"\w")
 _EMPTY_MARKERS = ("(пустой ответ)", "(empty response)")
 
-_REFUSAL_PATTERNS = (
+# Встроенные маркеры. По умолчанию проверки ВКЛЮЧЕНЫ (бракуют короткий отказ/
+# неуверенность). Выключить или заменить списки — через settings.selfcheck.
+DEFAULT_REFUSAL_PATTERNS: tuple[str, ...] = (
     "не могу",
     "не в состоянии",
     "не имею возможности",
@@ -47,7 +50,7 @@ _REFUSAL_PATTERNS = (
     "as a language model",
 )
 
-_UNCERTAIN_PATTERNS = (
+DEFAULT_UNCERTAIN_PATTERNS: tuple[str, ...] = (
     "не знаю",
     "не уверен",
     "затрудняюсь",
@@ -55,6 +58,70 @@ _UNCERTAIN_PATTERNS = (
     "i don't know",
     "i do not know",
 )
+
+# Совместимость со старыми импортами
+_REFUSAL_PATTERNS = DEFAULT_REFUSAL_PATTERNS
+_UNCERTAIN_PATTERNS = DEFAULT_UNCERTAIN_PATTERNS
+
+
+@dataclass
+class SelfcheckRules:
+    """Правила быстрых проверок refusal/uncertain (из settings.json)."""
+
+    flag_refusal: bool = True
+    flag_uncertain: bool = True
+    # None → встроенные DEFAULT_*; иначе свой список (пустой = не матчить)
+    refusal_patterns: list[str] | None = None
+    uncertain_patterns: list[str] | None = None
+
+    def refusal_list(self) -> tuple[str, ...]:
+        if self.refusal_patterns is None:
+            return DEFAULT_REFUSAL_PATTERNS
+        return tuple(p for p in self.refusal_patterns if p)
+
+    def uncertain_list(self) -> tuple[str, ...]:
+        if self.uncertain_patterns is None:
+            return DEFAULT_UNCERTAIN_PATTERNS
+        return tuple(p for p in self.uncertain_patterns if p)
+
+    def to_dict(self) -> dict:
+        return {
+            "flag_refusal": bool(self.flag_refusal),
+            "flag_uncertain": bool(self.flag_uncertain),
+            "refusal_patterns": (
+                None if self.refusal_patterns is None else list(self.refusal_patterns)
+            ),
+            "uncertain_patterns": (
+                None
+                if self.uncertain_patterns is None
+                else list(self.uncertain_patterns)
+            ),
+        }
+
+
+# Активный снимок (проставляет settings.apply_to_runtime)
+_RULES = SelfcheckRules()
+
+
+def get_rules() -> SelfcheckRules:
+    return SelfcheckRules(
+        flag_refusal=_RULES.flag_refusal,
+        flag_uncertain=_RULES.flag_uncertain,
+        refusal_patterns=(
+            None if _RULES.refusal_patterns is None else list(_RULES.refusal_patterns)
+        ),
+        uncertain_patterns=(
+            None
+            if _RULES.uncertain_patterns is None
+            else list(_RULES.uncertain_patterns)
+        ),
+    )
+
+
+def set_rules(rules: SelfcheckRules | None) -> None:
+    """Применить правила (обычно из settings). None → defaults."""
+    global _RULES
+    _RULES = rules if rules is not None else SelfcheckRules()
 
 # Арифметику проверяем сами: LLM-ревьюер такие ошибки пропускает
 _MATH_QUESTION_RE = re.compile(
@@ -314,10 +381,17 @@ def language_problems(user_text: str, answer: str) -> list[str]:
     return problems
 
 
-def content_problems(user_text: str, answer: str, *, expect_detail: bool) -> list[str]:
+def content_problems(
+    user_text: str,
+    answer: str,
+    *,
+    expect_detail: bool,
+    rules: SelfcheckRules | None = None,
+) -> list[str]:
     problems: list[str] = []
     text = (answer or "").strip()
     low = text.lower()
+    cfg = rules if rules is not None else _RULES
 
     if not text or low in _EMPTY_MARKERS:
         return ["empty"]
@@ -327,10 +401,14 @@ def content_problems(user_text: str, answer: str, *, expect_detail: bool) -> lis
         problems.append("too_short")
 
     head = low[:200]
-    if len(text) < 400 and any(p in head for p in _REFUSAL_PATTERNS):
-        problems.append("refusal")
-    if len(text) < 200 and any(p in low for p in _UNCERTAIN_PATTERNS):
-        problems.append("uncertain")
+    if cfg.flag_refusal and len(text) < 400:
+        refusal = cfg.refusal_list()
+        if refusal and any(p in head for p in refusal):
+            problems.append("refusal")
+    if cfg.flag_uncertain and len(text) < 200:
+        uncertain = cfg.uncertain_list()
+        if uncertain and any(p in low for p in uncertain):
+            problems.append("uncertain")
 
     if _has_loop(text):
         problems.append("repetition")
@@ -346,10 +424,12 @@ def llm_review(
     *,
     model: str = REVIEW_MODEL_DEFAULT,
     timeout: int = 180,
+    flag_refusal: bool | None = None,
 ) -> Verdict:
     """Ревью ответа отдельной моделью: ловит ошибки и уход от вопроса."""
     # Промпт ≤ ~3k токенов оценки — 4096 с запасом, без удержания полного 8k
     review_ctx = 4096
+    allow_refusal = _RULES.flag_refusal if flag_refusal is None else bool(flag_refusal)
     messages = [
         {"role": "system", "content": REVIEW_SYSTEM},
         {
@@ -378,6 +458,9 @@ def llm_review(
     problem = str(data.get("problem") or "error").strip()
     if problem in {"none", ""}:
         return Verdict(True, note="reviewed")
+    # Если refusal выключен в настройках — LLM-вердикт «refusal» не бракуем
+    if problem == "refusal" and not allow_refusal:
+        return Verdict(True, note="reviewed")
     if problem not in HINTS:
         problem = "error"
     note = str(data.get("hint") or "").strip()[:200]
@@ -391,10 +474,14 @@ def check(
     model: str | None = REVIEW_MODEL_DEFAULT,
     expect_detail: bool = True,
     use_llm: bool = True,
+    rules: SelfcheckRules | None = None,
 ) -> Verdict:
     """Полная проверка ответа: сначала дешёвые правила, затем LLM-ревью."""
+    cfg = rules if rules is not None else _RULES
     problems = language_problems(user_text, answer)
-    problems += content_problems(user_text, answer, expect_detail=expect_detail)
+    problems += content_problems(
+        user_text, answer, expect_detail=expect_detail, rules=cfg
+    )
     if problems:
         return Verdict(False, problems)
 
@@ -405,7 +492,9 @@ def check(
         return Verdict(True, note="math-verified")
 
     if use_llm and model and len(answer.strip()) >= 40:
-        return llm_review(user_text, answer, model=model)
+        return llm_review(
+            user_text, answer, model=model, flag_refusal=cfg.flag_refusal
+        )
 
     # Правила прошли, LLM не вызывали — для коротких ответов этого достаточно
     return Verdict(True, note="rules-only")

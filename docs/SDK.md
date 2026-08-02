@@ -3,7 +3,7 @@
 Документ для **встраивания** `qwen_orchestra` в другой Python-проект (бот, CLI, сервис).  
 Карта исходников самого репозитория — [AGENTS.md](../AGENTS.md). Установка окружения — [SETUP.md](../SETUP.md).
 
-**Версия пакета:** `0.1.1` · **Python:** ≥ 3.10 · **Публичный вход:** `from qwen_orchestra import Client, GenOptions`
+**Версия пакета:** `0.1.2` · **Python:** ≥ 3.10 · **Публичный вход:** `from qwen_orchestra import Client, GenOptions`
 
 ---
 
@@ -298,14 +298,42 @@ Defaults воркера, если ничего не задано: `temperature=0
 
 | Метод | Назначение |
 |-------|------------|
-| `get_settings()` | публичный payload (models, tiers, providers, defaults…) |
-| `update_settings(models=…, router_model=…)` | заменить пул целиком |
+| `get_settings()` | публичный payload (models, tiers, providers, selfcheck, defaults…) |
+| `update_settings(models=…, router_model=…, selfcheck=…)` | заменить пул (+ опц. selfcheck) |
 | `reset_settings()` | defaults |
 | `add_model(...)` | добавить/обновить одну запись |
 | `delete_model(model_id)` | удалить по id |
 | `set_openrouter_api_key(key \| None)` | записать/очистить ключ в `secrets.json` |
 
 Алиасы совместимости: `add_slot` / `delete_slot` (старое имя «слот»).
+
+#### `selfcheck` — отказы и неуверенность
+
+По умолчанию короткие ответы с маркерами отказа («не могу», …) или неуверенности
+(«не знаю», …) бракуются → retry. В боте часто нужно выключить:
+
+```python
+models = client.get_settings()["models"]
+client.update_settings(
+    models,
+    selfcheck={
+        "flag_refusal": False,      # не браковать «не могу»
+        "flag_uncertain": False,    # не браковать «не знаю»
+        # опционально свои фразы (null/отсутствие = встроенный список):
+        # "refusal_patterns": ["не могу", "не смог", "i cannot"],
+        # "uncertain_patterns": ["не знаю"],
+    },
+)
+```
+
+Или в `settings.json` рядом с пулом:
+
+```json
+"selfcheck": {
+  "flag_refusal": true,
+  "flag_uncertain": true
+}
+```
 
 #### `add_model` — параметры
 

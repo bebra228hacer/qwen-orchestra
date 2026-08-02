@@ -45,7 +45,7 @@ Local time: tiny `need_local_time` (без regex; любое упоминани�
 - Жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling` (+ shortcuts в `route`)
 - Тексты «когда какую модель» для LLM-роутера — `settings.py` / UI (не дублировать в коде)
 - Размер окна / история — только в `plan_worker_context` (+ хелперы рядом)
-- Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`)
+- Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`); `refusal`/`uncertain` включаются/паттерны — `settings.selfcheck` (не хардкодить в оркестре)
 - Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE
 - Публичный API для приложений — `qwen_orchestra.Client` (не плодить обходные импорты ядра без нужды)
 - По умолчанию `127.0.0.1`; `0.0.0.0` только через `--share` (опц. `--token`); не делать share дефолтом; не добавлять light-theme / полноценный multi-user / code-editor без запроса

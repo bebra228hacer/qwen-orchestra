@@ -119,6 +119,7 @@ class SettingsPutBody(BaseModel):
     models: list[dict[str, Any]] | None = None
     slots: list[dict[str, Any]] | None = None  # compat
     router_model: str | None = None
+    selfcheck: dict[str, Any] | None = None
 
 
 class AddModelBody(BaseModel):
@@ -309,7 +310,11 @@ def put_settings(body: SettingsPutBody) -> dict[str, Any]:
     if payload is None:
         raise HTTPException(status_code=400, detail="Нужен список models")
     try:
-        saved = app_settings.update_settings(payload, router_model=body.router_model)
+        saved = app_settings.update_settings(
+            payload,
+            router_model=body.router_model,
+            selfcheck=body.selfcheck,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return app_settings.public_settings_payload(saved)

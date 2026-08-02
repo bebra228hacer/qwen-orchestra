@@ -135,6 +135,7 @@
           <li><strong>Тир</strong> — tiny…frontier для Auto/эскалации, либо «не участвует в роутинге» (только ручной выбор в чате).</li>
           <li><strong>Rank</strong> — сила при выборе на тире и эскалации после selfcheck (больше = сильнее). Без тира не используется.</li>
           <li><strong>Промпт</strong> — когда роутеру выбирать этот тир (учитывается только у моделей с тиром).</li>
+          <li><strong>Самопроверка</strong> — браковать ли отказы («не могу») и неуверенность («не знаю»); списки фраз редактируются. По умолчанию оба включены.</li>
           <li><strong>Удалить</strong> — убрать модель из пула (последнюю удалить нельзя).</li>
         </ul>
         <h3>OpenRouter</h3>
@@ -170,6 +171,27 @@
           <label class="field-label" for="router-model-select">Модель роутера (Auto)</label>
           <select id="router-model-select" class="tier-select" title="Какая модель решает tier в Auto"></select>
         </div>
+      </div>
+      <div class="selfcheck-settings" id="selfcheck-settings">
+        <div class="field-label">Самопроверка ответа</div>
+        <p class="modal-hint">
+          По умолчанию короткий отказ («не могу»…) или неуверенность («не знаю»…) бракуются
+          и запускают retry. Можно выключить или заменить список фраз (по одной на строку).
+        </p>
+        <label class="selfcheck-opt">
+          <input type="checkbox" id="sc-flag-refusal" checked />
+          Браковать отказы (refusal)
+        </label>
+        <textarea id="sc-refusal-patterns" class="prompt-input" rows="3" spellcheck="false"
+          placeholder="не могу&#10;не в состоянии&#10;…"
+          title="Фразы отказа, по одной на строку"></textarea>
+        <label class="selfcheck-opt">
+          <input type="checkbox" id="sc-flag-uncertain" checked />
+          Браковать неуверенность (uncertain)
+        </label>
+        <textarea id="sc-uncertain-patterns" class="prompt-input" rows="2" spellcheck="false"
+          placeholder="не знаю&#10;не уверен&#10;…"
+          title="Фразы неуверенности, по одной на строку"></textarea>
       </div>
       <p class="modal-hint">
         Пул моделей: укажите тир для Auto или оставьте «не участвует в роутинге».

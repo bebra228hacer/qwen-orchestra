@@ -20,6 +20,10 @@
     btnModelsHelp: $("#btn-models-help"),
     modelsHelp: $("#models-help"),
     routerModelSelect: $("#router-model-select"),
+    scFlagRefusal: $("#sc-flag-refusal"),
+    scFlagUncertain: $("#sc-flag-uncertain"),
+    scRefusalPatterns: $("#sc-refusal-patterns"),
+    scUncertainPatterns: $("#sc-uncertain-patterns"),
     btnModelsSave: $("#btn-models-save"),
     btnModelsAdd: $("#btn-models-add"),
     btnModelsReset: $("#btn-models-reset"),
@@ -67,6 +71,7 @@
     slots: [], // пул моделей (compat имя)
     fixedTiers: [],
     routerModel: "",
+    selfcheckDefaults: null,
     panelOpen: true,
     panelWidth: PANEL_DEFAULT,
     metricsTimer: null,
@@ -983,6 +988,8 @@
     const data = await api("/api/settings");
     state.routerModel = data.router_model || "";
     state.fixedTiers = data.fixed_tiers || [];
+    state.selfcheckDefaults = (data.defaults && data.defaults.selfcheck) || null;
+    fillSelfcheckForm(data.selfcheck, state.selfcheckDefaults);
     const pool = poolFromPayload(data);
     renderModelsList(pool);
     populateTierSelect(pool);
@@ -992,6 +999,79 @@
     renderOpenRouterStatus(data.providers);
     syncAddProviderUi();
     return data;
+  }
+
+  function patternsToText(list) {
+    return Array.isArray(list) ? list.join("\n") : "";
+  }
+
+  function parsePatternLines(text) {
+    return String(text || "")
+      .split(/\r?\n/)
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+      .filter((s, i, arr) => arr.indexOf(s) === i);
+  }
+
+  function fillSelfcheckForm(sc, defaults) {
+    const cfg = sc || {};
+    const def = defaults || {};
+    if (els.scFlagRefusal) {
+      els.scFlagRefusal.checked = cfg.flag_refusal !== false;
+    }
+    if (els.scFlagUncertain) {
+      els.scFlagUncertain.checked = cfg.flag_uncertain !== false;
+    }
+    if (els.scRefusalPatterns) {
+      const list =
+        cfg.refusal_patterns_effective ||
+        cfg.refusal_patterns ||
+        def.refusal_patterns ||
+        [];
+      els.scRefusalPatterns.value = patternsToText(list);
+      els.scRefusalPatterns.dataset.usingDefault = cfg.using_default_refusal_patterns
+        ? "1"
+        : "0";
+    }
+    if (els.scUncertainPatterns) {
+      const list =
+        cfg.uncertain_patterns_effective ||
+        cfg.uncertain_patterns ||
+        def.uncertain_patterns ||
+        [];
+      els.scUncertainPatterns.value = patternsToText(list);
+      els.scUncertainPatterns.dataset.usingDefault = cfg.using_default_uncertain_patterns
+        ? "1"
+        : "0";
+    }
+  }
+
+  function collectSelfcheckFromDom() {
+    const refusal = parsePatternLines(
+      els.scRefusalPatterns ? els.scRefusalPatterns.value : ""
+    );
+    const uncertain = parsePatternLines(
+      els.scUncertainPatterns ? els.scUncertainPatterns.value : ""
+    );
+    const def = state.selfcheckDefaults || {};
+    const defRefusal = Array.isArray(def.refusal_patterns) ? def.refusal_patterns : [];
+    const defUncertain = Array.isArray(def.uncertain_patterns)
+      ? def.uncertain_patterns
+      : [];
+
+    const sameList = (a, b) =>
+      a.length === b.length && a.every((x, i) => x === b[i]);
+
+    // Если список совпадает со встроенным — храним null (builtins), иначе свой
+    const refusalOut = sameList(refusal, defRefusal) ? null : refusal;
+    const uncertainOut = sameList(uncertain, defUncertain) ? null : uncertain;
+
+    return {
+      flag_refusal: !!(els.scFlagRefusal && els.scFlagRefusal.checked),
+      flag_uncertain: !!(els.scFlagUncertain && els.scFlagUncertain.checked),
+      refusal_patterns: refusalOut,
+      uncertain_patterns: uncertainOut,
+    };
   }
 
   function toggleModelsHelp() {
@@ -1027,10 +1107,13 @@
         body: JSON.stringify({
           models,
           router_model: els.routerModelSelect.value || null,
+          selfcheck: collectSelfcheckFromDom(),
         }),
       });
       state.routerModel = data.router_model || "";
       state.fixedTiers = data.fixed_tiers || state.fixedTiers;
+      state.selfcheckDefaults = (data.defaults && data.defaults.selfcheck) || state.selfcheckDefaults;
+      fillSelfcheckForm(data.selfcheck, state.selfcheckDefaults);
       const pool = poolFromPayload(data);
       renderModelsList(pool);
       populateTierSelect(pool);
@@ -1050,6 +1133,7 @@
       body: JSON.stringify({
         models,
         router_model: els.routerModelSelect.value || null,
+        selfcheck: collectSelfcheckFromDom(),
       }),
     });
   }
@@ -1146,12 +1230,14 @@
   }
 
   async function resetModels() {
-    if (!confirm("Сбросить пул моделей и промпты к значениям по умолчанию?")) return;
+    if (!confirm("Сбросить пул моделей, промпты и самопроверку к значениям по умолчанию?")) return;
     setModelsStatus("Сброс…");
     try {
       const data = await api("/api/settings/reset", { method: "POST", body: "{}" });
       state.routerModel = data.router_model || "";
       state.fixedTiers = data.fixed_tiers || [];
+      state.selfcheckDefaults = (data.defaults && data.defaults.selfcheck) || null;
+      fillSelfcheckForm(data.selfcheck, state.selfcheckDefaults);
       const pool = poolFromPayload(data);
       renderModelsList(pool);
       populateTierSelect(pool);

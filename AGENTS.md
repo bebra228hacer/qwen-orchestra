@@ -78,6 +78,7 @@ client.set_openrouter_api_key(...)  # secrets.json; None — очистить
 
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом (не в git).
+Блок `selfcheck` (опц.): `flag_refusal` / `flag_uncertain` + списки фраз; по умолчанию оба флага `true`.
 Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не при голом импорте модулей.
 
 ### Пул моделей и OpenRouter
@@ -199,6 +200,11 @@ max ctx tiny/nano/small `4096`, остальные без потолка (8192).
 1. **Быстрые правила** (без модели):
    `cjk` (ушёл в иероглифы), `language` (не язык вопроса), `empty`, `too_short`,
    `refusal`, `uncertain`, `repetition` (зацикливание), `truncated` (незакрытый ```).
+   `refusal` / `uncertain` **по умолчанию включены** (короткий ответ с «не могу» /
+   «не знаю» → retry). Настройка в `settings.json` → `selfcheck` или UI «Модели и промпты»:
+   `flag_refusal` / `flag_uncertain` (bool) и опционально свои
+   `refusal_patterns` / `uncertain_patterns` (список фраз; `null`/отсутствие = встроенные).
+   При `flag_refusal=false` LLM-ревью тоже не бракует problem=`refusal`.
 2. **Арифметика** (`arithmetic_problems`): если в вопросе есть «сколько / посчитай /
    вычисли» и выражение, оно считается через `ast` и сверяется с ответом.
    Расхождение → `error`, а в `hint` уходит правильное значение. Совпало →
@@ -230,7 +236,7 @@ Web-tool результаты **кэшируются** между retry (пов�
 | GET | `/api/ready` | Быстрый ping (лаунчер; **без** Ollama) |
 | GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `pool` |
 | GET | `/api/metrics` | CPU / RAM / GPU / температуры / загруженные модели Ollama (`/api/ps`) |
-| GET/PUT | `/api/settings` | Пул `models` + `router_model` (`settings.json`) |
+| GET/PUT | `/api/settings` | Пул `models` + `router_model` + `selfcheck` (`settings.json`) |
 | PUT | `/api/settings/providers/openrouter` | API-ключ OpenRouter (`secrets.json`; `{api_key}` / `{clear:true}`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
 | POST | `/api/settings/models` | Добавить/обновить модель в пуле (`tier` опционален) |

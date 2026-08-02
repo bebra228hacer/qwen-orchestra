@@ -350,14 +350,108 @@ ModelSlot = PoolModel
 
 
 @dataclass
+class SelfcheckSettings:
+    """Настройки самопроверки: отказы / неуверенность.
+
+    По умолчанию бракуем короткие ответы с маркерами «не могу» / «не знаю»
+    (как раньше в коде). Можно выключить или задать свои фразы в settings.json.
+    """
+
+    flag_refusal: bool = True
+    flag_uncertain: bool = True
+    # None → встроенные паттерны из selfcheck; список → заменить (в т.ч. пустой)
+    refusal_patterns: list[str] | None = None
+    uncertain_patterns: list[str] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "flag_refusal": bool(self.flag_refusal),
+            "flag_uncertain": bool(self.flag_uncertain),
+        }
+        if self.refusal_patterns is not None:
+            out["refusal_patterns"] = list(self.refusal_patterns)
+        if self.uncertain_patterns is not None:
+            out["uncertain_patterns"] = list(self.uncertain_patterns)
+        return out
+
+    def to_rules(self):
+        from .selfcheck import SelfcheckRules
+
+        return SelfcheckRules(
+            flag_refusal=self.flag_refusal,
+            flag_uncertain=self.flag_uncertain,
+            refusal_patterns=(
+                None if self.refusal_patterns is None else list(self.refusal_patterns)
+            ),
+            uncertain_patterns=(
+                None
+                if self.uncertain_patterns is None
+                else list(self.uncertain_patterns)
+            ),
+        )
+
+
+def default_selfcheck_settings() -> SelfcheckSettings:
+    return SelfcheckSettings()
+
+
+def _normalize_pattern_list(raw: Any) -> list[str] | None:
+    """None → builtins-сигнал; иначе список строк (можно пустой)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        lines = [
+            ln.strip().lower()
+            for ln in raw.replace("\r\n", "\n").split("\n")
+        ]
+        return [ln for ln in lines if ln]
+    if not isinstance(raw, (list, tuple)):
+        return None
+    out: list[str] = []
+    for item in raw:
+        s = str(item or "").strip().lower()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def _selfcheck_from_dict(raw: Any) -> SelfcheckSettings:
+    if not isinstance(raw, dict):
+        return default_selfcheck_settings()
+    flag_refusal = raw.get("flag_refusal")
+    flag_uncertain = raw.get("flag_uncertain")
+    # Явные false/true; отсутствие → True (старое поведение)
+    fr = True if flag_refusal is None else bool(flag_refusal)
+    fu = True if flag_uncertain is None else bool(flag_uncertain)
+
+    def _patterns_field(key: str) -> list[str] | None:
+        if key not in raw:
+            return None
+        val = raw.get(key)
+        if val is None:
+            return None  # явный null → builtins
+        parsed = _normalize_pattern_list(val)
+        return [] if parsed is None else parsed
+
+    return SelfcheckSettings(
+        flag_refusal=fr,
+        flag_uncertain=fu,
+        refusal_patterns=_patterns_field("refusal_patterns"),
+        uncertain_patterns=_patterns_field("uncertain_patterns"),
+    )
+
+
+@dataclass
 class AppSettings:
     models: list[PoolModel] = field(default_factory=list)
     router_model: str = DEFAULT_ROUTER_MODEL
+    selfcheck: SelfcheckSettings = field(default_factory=default_selfcheck_settings)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "router_model": self.router_model,
             "models": [m.to_dict() for m in self.models],
+            "selfcheck": self.selfcheck.to_dict(),
         }
 
     # Совместимость: старый код ждал .slots
@@ -502,7 +596,11 @@ def _default_pool() -> list[PoolModel]:
 
 
 def default_settings() -> AppSettings:
-    return AppSettings(models=_default_pool(), router_model=DEFAULT_ROUTER_MODEL)
+    return AppSettings(
+        models=_default_pool(),
+        router_model=DEFAULT_ROUTER_MODEL,
+        selfcheck=default_selfcheck_settings(),
+    )
 
 
 def _slots_to_pool(raw_slots: list[Any]) -> list[dict[str, Any]]:
@@ -570,7 +668,8 @@ def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
         ),
     )
     router_model = _normalize_router_model(raw.get("router_model"), fallback=tiny)
-    return AppSettings(models=models, router_model=router_model)
+    selfcheck = _selfcheck_from_dict(raw.get("selfcheck"))
+    return AppSettings(models=models, router_model=router_model, selfcheck=selfcheck)
 
 
 def load_settings(*, path: Path | None = None) -> AppSettings:
@@ -596,6 +695,7 @@ def deepcopy_settings(src: AppSettings) -> AppSettings:
     return AppSettings(
         models=[_pool_from_dict(m.to_dict(), used_ids=used) for m in src.models],
         router_model=src.router_model,
+        selfcheck=_selfcheck_from_dict(src.selfcheck.to_dict()),
     )
 
 
@@ -750,12 +850,31 @@ def build_route_schema(settings: AppSettings | None = None) -> dict[str, Any]:
 
 
 def public_settings_payload(settings: AppSettings | None = None) -> dict[str, Any]:
+    from .selfcheck import DEFAULT_REFUSAL_PATTERNS, DEFAULT_UNCERTAIN_PATTERNS
+
     s = settings or get_settings()
+    sc = s.selfcheck
     return {
         "router_model": s.router_model,
         "models": [m.to_dict() for m in s.models],
         # compat для старого UI на один релиз
         "slots": [m.to_dict() for m in s.models],
+        "selfcheck": {
+            **sc.to_dict(),
+            # эффективные списки для UI (builtins, если не переопределены)
+            "refusal_patterns_effective": list(
+                sc.refusal_patterns
+                if sc.refusal_patterns is not None
+                else DEFAULT_REFUSAL_PATTERNS
+            ),
+            "uncertain_patterns_effective": list(
+                sc.uncertain_patterns
+                if sc.uncertain_patterns is not None
+                else DEFAULT_UNCERTAIN_PATTERNS
+            ),
+            "using_default_refusal_patterns": sc.refusal_patterns is None,
+            "using_default_uncertain_patterns": sc.uncertain_patterns is None,
+        },
         "fixed_tiers": [
             {
                 "id": tid,
@@ -771,6 +890,11 @@ def public_settings_payload(settings: AppSettings | None = None) -> dict[str, An
             "models": [m.to_dict() for m in _default_pool()],
             "router_prompts": DEFAULT_ROUTER_PROMPTS,
             "fixed_tiers": list(FIXED_TIER_IDS),
+            "selfcheck": {
+                **default_selfcheck_settings().to_dict(),
+                "refusal_patterns": list(DEFAULT_REFUSAL_PATTERNS),
+                "uncertain_patterns": list(DEFAULT_UNCERTAIN_PATTERNS),
+            },
         },
         "router_system": build_router_system(s),
         "providers": {
@@ -852,8 +976,9 @@ def update_settings(
     models_payload: list[dict[str, Any]],
     *,
     router_model: str | None = None,
+    selfcheck: dict[str, Any] | SelfcheckSettings | None = None,
 ) -> AppSettings:
-    """Полная замена пула (+ опционально модель роутера)."""
+    """Полная замена пула (+ опционально модель роутера / selfcheck)."""
     if not isinstance(models_payload, list) or not models_payload:
         raise ValueError("Нужен непустой список models")
     for item in models_payload:
@@ -866,7 +991,13 @@ def update_settings(
     )
     used: set[str] = set()
     models = [_pool_from_dict(x, used_ids=used) for x in models_payload]
-    return save_settings(AppSettings(models=models, router_model=rm))
+    if selfcheck is None:
+        sc = _selfcheck_from_dict(current.selfcheck.to_dict())
+    elif isinstance(selfcheck, SelfcheckSettings):
+        sc = selfcheck
+    else:
+        sc = _selfcheck_from_dict(selfcheck)
+    return save_settings(AppSettings(models=models, router_model=rm, selfcheck=sc))
 
 
 def delete_model(model_id: str) -> AppSettings:
@@ -1006,6 +1137,10 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
         orchestra.OPTIONAL_TIERS = tuple(FIXED_TIER_IDS)
         orchestra.SELFCHECK_MODEL = selfcheck
         orchestra._COMPLEX_TIERS = complex_tiers  # type: ignore[attr-defined]
+
+        from . import selfcheck as selfcheck_mod
+
+        selfcheck_mod.set_rules(s.selfcheck.to_rules())
 
         for key, val in ranks.items():
             router.TIER_RANK[key] = val

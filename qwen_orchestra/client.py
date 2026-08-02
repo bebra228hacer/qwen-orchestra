@@ -158,12 +158,15 @@ class Client:
         *,
         slots: list[dict[str, Any]] | None = None,
         router_model: str | None = None,
+        selfcheck: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         app_settings.ensure_bootstrapped()
         payload = models if models is not None else slots
         if payload is None:
             raise ValueError("Нужен список models")
-        app_settings.update_settings(payload, router_model=router_model)
+        app_settings.update_settings(
+            payload, router_model=router_model, selfcheck=selfcheck
+        )
         return app_settings.public_settings_payload()
 
     def reset_settings(self) -> dict[str, Any]:
