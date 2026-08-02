@@ -252,13 +252,16 @@ def main() -> int:
     _owned_ollama = owned
 
     if healthy():
-        # Чужая сессия сервера — Ollama, если подняли мы, оставляем ей
-        if _owned_ollama is not None:
-            print("Сервер чата уже работает — Ollama не останавливаем при выходе лаунчера.")
-            _owned_ollama = None
         print(f"Сервер уже запущен: {URL}")
         open_browser(URL)
         print(f"Браузер: {URL}")
+        if _owned_ollama is not None:
+            print("Ollama поднята лаунчером — Enter / Ctrl+C остановит её.")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                print()
+            cleanup_owned()
         return 0
 
     if not server_py.is_file():

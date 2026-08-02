@@ -7,13 +7,13 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Any, Iterator
 
 import urllib.error
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,18 @@ import settings as app_settings
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
+ALLOWED_HOSTS = frozenset(
+    {
+        "127.0.0.1",
+        "localhost",
+        "127.0.0.1:8787",
+        "localhost:8787",
+        "[::1]",
+        "[::1]:8787",
+    }
+)
+SSE_QUEUE_MAX = 512
+MAX_MESSAGE_CHARS = 100_000
 
 app = FastAPI(title="Qwen Orchestra Chat", docs_url=None, redoc_url=None)
 
@@ -40,6 +52,7 @@ class ChatSession(BaseModel):
     created_at: float
     updated_at: float
     messages: list[ChatMessage] = Field(default_factory=list)
+    generation: int = 0
 
 
 class CreateChatBody(BaseModel):
@@ -117,6 +130,26 @@ def _worker_lock(chat_id: str) -> threading.Lock:
         return lock
 
 
+@app.middleware("http")
+async def localhost_host_guard(request: Request, call_next):  # noqa: ANN001
+    """Защита от DNS rebinding: принимаем только localhost Host."""
+    host = (request.headers.get("host") or "").strip().lower()
+    if host and host not in ALLOWED_HOSTS:
+        return JSONResponse({"detail": "Forbidden host"}, status_code=403)
+    origin = (request.headers.get("origin") or "").strip().lower()
+    if origin and request.method in {"POST", "PUT", "DELETE", "PATCH"}:
+        # browser Origin вида http://127.0.0.1:8787
+        allowed_origins = {
+            "http://127.0.0.1:8787",
+            "http://localhost:8787",
+            "http://[::1]:8787",
+            "null",  # file:// / некоторые локальные кейсы
+        }
+        if origin not in allowed_origins:
+            return JSONResponse({"detail": "Forbidden origin"}, status_code=403)
+    return await call_next(request)
+
+
 @app.get("/api/ready")
 def ready() -> dict[str, bool]:
     """Быстрый ping для лаунчера (без обращения к Ollama)."""
@@ -130,12 +163,19 @@ def health() -> dict[str, Any]:
     missing: list[str] = []
     missing_optional: list[str] = []
     error: str | None = None
+    router_missing = False
     try:
         models = installed_models()
         have = set(models)
         ollama_ok = True
         missing = missing_models(have)
         missing_optional = missing_optional_models(have)
+        router_name = app_settings.get_settings().router_model
+        if router_name and router_name not in have:
+            # точное имя или префикс тега
+            router_missing = not any(
+                m == router_name or m.startswith(router_name + ":") for m in have
+            )
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
     return {
@@ -144,6 +184,8 @@ def health() -> dict[str, Any]:
         "models": models,
         "missing": missing,
         "missing_optional": missing_optional,
+        "router_model": app_settings.get_settings().router_model,
+        "router_missing": router_missing,
         "tiers": MODELS,
         "slots": [s.to_dict() for s in app_settings.get_settings().slots],
         "error": error,
@@ -240,24 +282,37 @@ def get_chat(chat_id: str) -> dict[str, Any]:
 
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: str) -> dict[str, str]:
-    with _lock:
-        if chat_id not in _chats:
-            raise HTTPException(404, "Chat not found")
-        del _chats[chat_id]
-        _chat_workers.pop(chat_id, None)
-    return {"status": "ok"}
+    wlock = _worker_lock(chat_id)
+    if not wlock.acquire(blocking=False):
+        raise HTTPException(409, "Дождитесь ответа на предыдущее сообщение в этом чате")
+    try:
+        with _lock:
+            if chat_id not in _chats:
+                raise HTTPException(404, "Chat not found")
+            del _chats[chat_id]
+            _chat_workers.pop(chat_id, None)
+        return {"status": "ok"}
+    finally:
+        wlock.release()
 
 
 @app.post("/api/chats/{chat_id}/clear")
 def clear_chat(chat_id: str) -> dict[str, Any]:
-    with _lock:
-        chat = _chats.get(chat_id)
-        if not chat:
-            raise HTTPException(404, "Chat not found")
-        chat.messages.clear()
-        chat.title = "New Chat"
-        chat.updated_at = _now()
-        return _chat_summary(chat)
+    wlock = _worker_lock(chat_id)
+    if not wlock.acquire(blocking=False):
+        raise HTTPException(409, "Дождитесь ответа на предыдущее сообщение в этом чате")
+    try:
+        with _lock:
+            chat = _chats.get(chat_id)
+            if not chat:
+                raise HTTPException(404, "Chat not found")
+            chat.messages.clear()
+            chat.title = "New Chat"
+            chat.updated_at = _now()
+            chat.generation += 1
+            return _chat_summary(chat)
+    finally:
+        wlock.release()
 
 
 def _sse(event: str, data: dict[str, Any] | str) -> str:
@@ -265,34 +320,62 @@ def _sse(event: str, data: dict[str, Any] | str) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+def _q_put(q: Queue, item: tuple[str, Any] | None) -> None:
+    """Неблокирующая запись: при переполнении вытесняем старые token-события."""
+    while True:
+        try:
+            q.put(item, block=False)
+            return
+        except Full:
+            try:
+                q.get_nowait()
+            except Empty:
+                return
+
+
 @app.post("/api/chats/{chat_id}/messages")
 def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
     content = (body.content or "").strip()
     if not content:
         raise HTTPException(400, "Empty message")
+    if len(content) > MAX_MESSAGE_CHARS:
+        raise HTTPException(400, f"Сообщение слишком длинное (>{MAX_MESSAGE_CHARS})")
 
-    with _lock:
-        chat = _chats.get(chat_id)
-        if not chat:
-            raise HTTPException(404, "Chat not found")
-        history = [
-            {"role": m.role, "content": m.content}
-            for m in chat.messages
-            if m.role in {"user", "assistant"}
-        ]
-        if chat.title == "New Chat":
-            chat.title = _title_from(content)
-        chat.messages.append(ChatMessage(role="user", content=content))
-        chat.updated_at = _now()
+    wlock = _worker_lock(chat_id)
+    if not wlock.acquire(blocking=False):
+        raise HTTPException(409, "Дождитесь ответа на предыдущее сообщение в этом чате")
 
-    q: Queue[tuple[str, Any] | None] = Queue()
+    try:
+        with _lock:
+            chat = _chats.get(chat_id)
+            if not chat:
+                wlock.release()
+                raise HTTPException(404, "Chat not found")
+            history = [
+                {"role": m.role, "content": m.content}
+                for m in chat.messages
+                if m.role in {"user", "assistant"}
+            ]
+            if chat.title == "New Chat":
+                chat.title = _title_from(content)
+            chat.messages.append(ChatMessage(role="user", content=content))
+            chat.updated_at = _now()
+            generation = chat.generation
+    except HTTPException:
+        raise
+    except Exception:
+        wlock.release()
+        raise
+
+    q: Queue[tuple[str, Any] | None] = Queue(maxsize=SSE_QUEUE_MAX)
 
     def on_token(token: str) -> None:
-        q.put(("token", {"text": token}))
+        _q_put(q, ("token", {"text": token}))
 
     def on_status(event: str, payload: dict[str, Any]) -> None:
         if event == "route":
-            q.put(
+            _q_put(
+                q,
                 (
                     "meta",
                     {
@@ -302,10 +385,11 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "route_reason": payload.get("reason"),
                         "ok": payload.get("ok"),
                     },
-                )
+                ),
             )
         elif event == "tool":
-            q.put(
+            _q_put(
+                q,
                 (
                     "tool",
                     {
@@ -313,10 +397,11 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "arguments": payload.get("arguments"),
                         "model": payload.get("model"),
                     },
-                )
+                ),
             )
         elif event == "worker":
-            q.put(
+            _q_put(
+                q,
                 (
                     "meta",
                     {
@@ -327,10 +412,11 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "num_ctx": payload.get("num_ctx"),
                         "used_history": payload.get("used_history"),
                     },
-                )
+                ),
             )
         elif event == "context":
-            q.put(
+            _q_put(
+                q,
                 (
                     "meta",
                     {
@@ -341,10 +427,11 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "history_messages": payload.get("history_messages"),
                         "tier": payload.get("tier"),
                     },
-                )
+                ),
             )
         elif event == "selfcheck":
-            q.put(
+            _q_put(
+                q,
                 (
                     "check",
                     {
@@ -353,12 +440,13 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "note": payload.get("note") or "",
                         "attempt": payload.get("attempt"),
                         "model": payload.get("model"),
+                        "checked": payload.get("checked"),
                     },
-                )
+                ),
             )
         elif event == "retry":
-            # phase=retry — сигнал UI очистить забракованный текст
-            q.put(
+            _q_put(
+                q,
                 (
                     "meta",
                     {
@@ -369,10 +457,11 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "problems": payload.get("problems") or [],
                         "escalated": True,
                     },
-                )
+                ),
             )
         elif event == "restore":
-            q.put(
+            _q_put(
+                q,
                 (
                     "meta",
                     {
@@ -381,15 +470,10 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         "tier": payload.get("tier"),
                         "problems": [],
                     },
-                )
+                ),
             )
 
     def worker() -> None:
-        wlock = _worker_lock(chat_id)
-        if not wlock.acquire(blocking=False):
-            q.put(("error", {"message": "Дождитесь ответа на предыдущее сообщение в этом чате"}))
-            q.put(None)
-            return
         try:
             result = handle(
                 content,
@@ -403,7 +487,7 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
             meta = _result_meta(result)
             with _lock:
                 c = _chats.get(chat_id)
-                if c is not None:
+                if c is not None and c.generation == generation:
                     c.messages.append(
                         ChatMessage(
                             role="assistant",
@@ -412,14 +496,14 @@ def send_message(chat_id: str, body: SendMessageBody) -> StreamingResponse:
                         )
                     )
                     c.updated_at = _now()
-            q.put(("done", {"text": result.text, **meta}))
+            _q_put(q, ("done", {"text": result.text, **meta}))
         except urllib.error.URLError as exc:
-            q.put(("error", {"message": f"Ollama недоступна: {exc}"}))
+            _q_put(q, ("error", {"message": f"Ollama недоступна: {exc}"}))
         except Exception as exc:  # noqa: BLE001
-            q.put(("error", {"message": str(exc)}))
+            _q_put(q, ("error", {"message": str(exc)}))
         finally:
             wlock.release()
-            q.put(None)
+            _q_put(q, None)
 
     threading.Thread(target=worker, daemon=True).start()
 

@@ -25,6 +25,8 @@
   --panel-width: 300px;
   --chart-gpu: #4a9eff;
   --chart-vram: #7ec699;
+  --chart-temp-gpu: #f0a050;
+  --chart-temp-mem: #e8c96a;
   --chart-ram: #d4a574;
   --chart-cpu: #e06c75;
 }
@@ -1017,13 +1019,6 @@ input {
   align-items: end;
 }
 
-.slot-row {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
-  align-items: center;
-}
-
 .add-slot-form {
   border-top: 1px solid var(--border-soft);
   padding-top: 12px;
@@ -1225,6 +1220,26 @@ input {
 
 .monitor-bar.vram > span {
   background: var(--chart-vram);
+}
+
+.monitor-bar.temp-gpu > span {
+  background: var(--chart-temp-gpu);
+}
+
+.monitor-bar.temp-mem > span {
+  background: var(--chart-temp-mem);
+}
+
+.monitor-bar.temp.ok > span {
+  background: #7ec699;
+}
+
+.monitor-bar.temp.warm > span {
+  background: #f0a050;
+}
+
+.monitor-bar.temp.hot > span {
+  background: #e06c75;
 }
 
 .monitor-bar.ram > span {

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
+import socket
 import urllib.error
 import urllib.request
 from html.parser import HTMLParser
+from urllib.parse import urlparse
 
 
 class _TextExtractor(HTMLParser):
@@ -31,6 +34,76 @@ class _TextExtractor(HTMLParser):
 
     def text(self) -> str:
         return "\n".join(self._chunks)
+
+
+_BLOCKED_HOSTS = {
+    "localhost",
+    "localhost.localdomain",
+    "metadata.google.internal",
+    "metadata",
+    "kubernetes.default",
+    "kubernetes.default.svc",
+}
+
+
+def _is_blocked_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return bool(
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _host_blocked(host: str) -> str | None:
+    host = (host or "").strip().lower().rstrip(".")
+    if not host:
+        return "Ошибка: пустой хост в URL"
+    if host in _BLOCKED_HOSTS or host.endswith(".localhost"):
+        return "Ошибка: запрещён доступ к локальным адресам"
+    # IP в URL без DNS
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if _is_blocked_ip(host):
+            return "Ошибка: запрещён доступ к private/loopback IP"
+        return None
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        return f"Ошибка: не удалось разрешить хост ({exc})"
+    for info in infos:
+        ip = info[4][0]
+        if _is_blocked_ip(ip):
+            return f"Ошибка: хост резолвится в запрещённый адрес ({ip})"
+    return None
+
+
+def _url_blocked(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return "Ошибка: URL должен начинаться с http:// или https://"
+    if parsed.username or parsed.password:
+        return "Ошибка: URL с credentials запрещён"
+    return _host_blocked(parsed.hostname or "")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Проверяем цель каждого редиректа (SSRF)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        err = _url_blocked(newurl)
+        if err:
+            raise urllib.error.HTTPError(newurl, 403, err, headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def web_search(query: str, max_results: int = 5) -> str:
@@ -62,10 +135,11 @@ def web_search(query: str, max_results: int = 5) -> str:
 
 
 def fetch_url(url: str, max_chars: int = 4000) -> str:
-    """Скачать страницу и извлечь текст."""
+    """Скачать страницу и извлечь текст (без private/loopback — защита от SSRF)."""
     url = (url or "").strip()
-    if not url.startswith(("http://", "https://")):
-        return "Ошибка: URL должен начинаться с http:// или https://"
+    blocked = _url_blocked(url)
+    if blocked:
+        return blocked
 
     req = urllib.request.Request(
         url,
@@ -79,8 +153,13 @@ def fetch_url(url: str, max_chars: int = 4000) -> str:
     )
     # Читаем ограниченный объём байт (HTML раздут относительно текста)
     max_bytes = max(max_chars * 8, 64_000)
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with opener.open(req, timeout=20) as resp:
+            final_url = resp.geturl() or url
+            again = _url_blocked(final_url)
+            if again:
+                return again
             ctype = (resp.headers.get_content_type() or "").lower()
             if ctype and not any(
                 x in ctype for x in ("text/", "html", "xml", "json", "javascript")

@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import threading
-from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ SETTINGS_PATH = ROOT / "settings.json"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _lock = threading.RLock()
+# Синхронизация apply_to_runtime ↔ orchestra.handle (снимок слотов)
+runtime_lock = threading.RLock()
 
 # Промпты по умолчанию: когда роутеру выбирать этот слот
 DEFAULT_ROUTER_PROMPTS: dict[str, str] = {
@@ -253,7 +256,10 @@ def load_settings(*, path: Path | None = None) -> AppSettings:
                 raw = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 raw = None
-            _settings = _merge_with_defaults(raw if isinstance(raw, dict) else None)
+            try:
+                _settings = _merge_with_defaults(raw if isinstance(raw, dict) else None)
+            except (ValueError, TypeError):
+                _settings = default_settings()
         else:
             _settings = default_settings()
         return deepcopy_settings(_settings)
@@ -277,11 +283,24 @@ def save_settings(settings: AppSettings, *, path: Path | None = None) -> AppSett
     global _settings
     p = path or SETTINGS_PATH
     normalized = _merge_with_defaults(settings.to_dict())
-    # сохранить и пользовательские слоты как есть после merge
-    # merge уже включил customs из settings.to_dict()
     text = json.dumps(normalized.to_dict(), ensure_ascii=False, indent=2) + "\n"
     with _lock:
-        p.write_text(text, encoding="utf-8")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(p.parent), prefix=".settings-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(text)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, p)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
         _settings = normalized
         apply_to_runtime(normalized)
         return deepcopy_settings(normalized)
@@ -436,11 +455,6 @@ def update_settings(
     )
 
 
-# совместимость со старым именем
-def update_slots(slots_payload: list[dict[str, Any]]) -> AppSettings:
-    return update_settings(slots_payload)
-
-
 def delete_slot(slot_id: str) -> AppSettings:
     s = get_settings()
     sid = slot_id.strip().lower()
@@ -462,27 +476,43 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
     models = models_map(s)
     ranks = tier_rank(s)
     order = tier_order(s)
-
-    # mutate in place — иначе `from orchestra import MODELS` останется со старым dict
-    orchestra.MODELS.clear()
-    orchestra.MODELS.update(models)
-    orchestra.REQUIRED_TIERS = required_ids(s)  # type: ignore[assignment]
-    orchestra.OPTIONAL_TIERS = optional_ids(s)  # type: ignore[assignment]
-    orchestra.SELFCHECK_MODEL = models.get("mid") or next(iter(models.values()), "")
+    required = required_ids(s)
+    optional = optional_ids(s)
+    selfcheck = models.get("mid") or next(iter(models.values()), "")
     heavy_rank = ranks.get("heavy", 2)
-    orchestra._COMPLEX_TIERS = frozenset(  # type: ignore[attr-defined]
+    complex_tiers = frozenset(
         tid for tid, r in ranks.items() if r >= heavy_rank or tid in {"heavy", "xlarge", "coder"}
     )
+    route_model = s.router_model or models.get("tiny") or router.ROUTE_MODEL
+    revalidate = models.get("mid") or router.REVALIDATE_MODEL
+    system = build_router_system(s)
+    schema = build_route_schema(s)
+    auto_tiers = frozenset(router_auto_ids(s))
 
-    router.TIER_RANK.clear()
-    router.TIER_RANK.update(ranks)
-    router.TIER_ORDER[:] = order
-    router.ALL_TIERS = frozenset(ranks)
-    router.ROUTE_MODEL = s.router_model or models.get("tiny") or router.ROUTE_MODEL
-    router.REVALIDATE_MODEL = models.get("mid") or router.REVALIDATE_MODEL
-    router.SYSTEM = build_router_system(s)
-    router.ROUTE_SCHEMA = build_route_schema(s)
-    router.ROUTER_AUTO_TIERS = frozenset(router_auto_ids(s))
+    with runtime_lock:
+        # Без clear(): иначе параллельный handle() увидит пустой MODELS
+        for key, val in models.items():
+            orchestra.MODELS[key] = val
+        for key in list(orchestra.MODELS):
+            if key not in models:
+                del orchestra.MODELS[key]
+        orchestra.REQUIRED_TIERS = required  # type: ignore[assignment]
+        orchestra.OPTIONAL_TIERS = optional  # type: ignore[assignment]
+        orchestra.SELFCHECK_MODEL = selfcheck
+        orchestra._COMPLEX_TIERS = complex_tiers  # type: ignore[attr-defined]
+
+        for key, val in ranks.items():
+            router.TIER_RANK[key] = val
+        for key in list(router.TIER_RANK):
+            if key not in ranks:
+                del router.TIER_RANK[key]
+        router.TIER_ORDER[:] = order
+        router.ALL_TIERS = frozenset(ranks)
+        router.ROUTE_MODEL = route_model
+        router.REVALIDATE_MODEL = revalidate
+        router.SYSTEM = system
+        router.ROUTE_SCHEMA = schema
+        router.ROUTER_AUTO_TIERS = auto_tiers
 
 
 # Загрузка при импорте модуля настроек — оркестр/роутер подхватят через apply

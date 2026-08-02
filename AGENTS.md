@@ -20,7 +20,7 @@
    - `highlight.min.js` + `highlight-github-dark.min.css` — подсветка кода;
    - `katex/` — KaTeX + auto-render + fonts (формулы `$…$` / `$$…$$`).
    Подключение в `web/index.html`; CDN не нужен (офлайн-чат).
-6. Для GPU-метрик в правой панели — NVIDIA + `nvidia-smi` в PATH (иначе секция GPU пустая).
+6. Для GPU-метрик и температур в правой панели — NVIDIA + `nvidia-smi` в PATH (иначе секции GPU/температур пустые). Температура цепей памяти часто N/A на GDDR.
 
 На GPU ~8 ГБ VRAM 14b часто идёт как hybrid CPU/GPU — скорость ниже, чем у 9b на 100% GPU.
 
@@ -33,7 +33,7 @@
 | `router.py` | Роутер на tiny + `tier_floor` / `tier_ceiling`; SYSTEM из settings |
 | `selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на mid (4b) |
 | `llm.py` | Клиент Ollama: `chat`, `chat_stream`, `installed_models` (+ `think: false` для Qwen3.5) |
-| `metrics.py` | CPU/RAM (`psutil`), GPU (`nvidia-smi`), Ollama `/api/ps` для панели монитора |
+| `metrics.py` | CPU/RAM (`psutil`), GPU/VRAM/температуры (`nvidia-smi`), Ollama `/api/ps` для панели монитора |
 | `tools_web.py` | `web_search`, `fetch_url` |
 | `orchestra_chat.py` | CLI оркестра |
 | `ask_orchestra.py` | Один вопрос через оркестр |
@@ -45,6 +45,7 @@
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
 | `QwenChat.exe` / `QwenChat.bat` | Сборка/обёртка лаунчера |
 | `start.bat` | Меню режимов (CP866, `cd /d "%~dp0"`) |
+| `CODE_AUDIT.md` | Статический аудит: баги / избыточность / оптимизации; не перепроверять заново без нужды |
 
 ## Оркестр — как работает
 
@@ -172,15 +173,15 @@ Web-tool результаты **кэшируются** между retry (пов�
 |---|---|---|
 | GET | `/api/ready` | Быстрый ping (лаунчер; **без** Ollama) |
 | GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `slots` |
-| GET | `/api/metrics` | CPU / RAM / GPU / загруженные модели Ollama (`/api/ps`) |
+| GET | `/api/metrics` | CPU / RAM / GPU / температуры / загруженные модели Ollama (`/api/ps`) |
 | GET/PUT | `/api/settings` | Слоты моделей + `router_model` + промпты роутера (`settings.json`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
 | POST | `/api/settings/slots` | Добавить нейронку в список |
 | DELETE | `/api/settings/slots/{id}` | Удалить пользовательский слот |
 | GET/POST | `/api/chats` | Список / создать |
-| GET/DELETE | `/api/chats/{id}` | История / удалить |
-| POST | `/api/chats/{id}/clear` | Очистить |
-| POST | `/api/chats/{id}/messages` | SSE ответ |
+| GET/DELETE | `/api/chats/{id}` | История / удалить (409 если идёт генерация) |
+| POST | `/api/chats/{id}/clear` | Очистить (409 если идёт генерация) |
+| POST | `/api/chats/{id}/messages` | SSE ответ (409 при параллельном POST) |
 
 Тело сообщения: `{ "content": "...", "force_tier": null|"<slot_id>" }`.
 
@@ -191,13 +192,15 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 - `check`: `{ok, problems, note, attempt, model, checked}` — результат самопроверки.
 - `done`: `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`.
 
-`/api/health`: `ok` = Ollama доступна и нет **обязательных** missing; `missing_optional` — 14b/coder.
+Middleware: только Host `127.0.0.1`/`localhost` (+порт); для мутаций — Origin localhost (защита от DNS rebinding).
+Параллельные сообщения / clear / delete сериализуются worker-lock’ом; после clear ответ старого worker не дописывается (`generation`).
+
+`/api/health`: `ok` = Ollama доступна и нет **обязательных** missing; `missing_optional` — 14b/coder;
+`router_missing` — модель роутера из settings не найдена в Ollama.
 Один запрос `/api/tags` на health (список моделей переиспользуется).
 
-`/api/metrics`: снимок для правой панели — `cpu`, `ram`, `gpu[]` (nvidia-smi), `ollama.models[]`
-с `gpu_ratio`/`cpu_ratio`/`place` (из `size_vram`/`size`). Кэш ~0.6 с. Без NVIDIA GPU-секция пустая.
-
-Параллельные сообщения в одном чате сериализуются (второй POST получит ошибку, пока идёт первый).
+`/api/metrics`: снимок для правой панели — `cpu`, `ram`, `gpu[]` (util, VRAM, `temp_gpu_c`, `temp_memory_c`, пороги), `ollama.models[]`
+с `gpu_ratio`/`cpu_ratio`/`place` (из `size_vram`/`size`). Кэш ~0.6 с. Без NVIDIA секции GPU/температур пустые.
 
 Чаты **in-memory** (пропадают при рестарте процесса).
 
@@ -205,7 +208,7 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 
 Трёхколоночный layout: сайдбар · чат · монитор. По умолчанию открыта.
 
-- Секции: нейронки в Ollama (где крутятся + доля GPU/CPU), GPU/VRAM, RAM, CPU + sparklines.
+- Секции: модели в Ollama (размещение слоёв GPU/CPU + доля VRAM карты), GPU/VRAM, температуры (ядро + цепи памяти), RAM, CPU + sparklines.
 - Ширина регулируется drag-ресайзером (220–960px, по ширине окна); частота опроса — селект 1…10 с.
 - Высота каждого sparkline — отдельный вертикальный ресайзер (сохраняется в `localStorage`).
 - Одна кнопка toggle `›`/`‹` в левом верхнем углу панели (свернуть / развернуть); в свёрнутом виде остаётся узкая полоска 40px.
@@ -262,6 +265,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 8. Отвечать пользователю **по-русски**, если не попросил иначе.
 9. Коммиты — только по явной просьбе.
 10. При смене тиров / контекста / API — обновлять `README.md`, `AGENTS.md`, `.cursor/rules/qwen-orchestra.mdc`.
+11. Перед полным «найди баги по всему проекту» — сначала `CODE_AUDIT.md`; повторный аудит только после крупных правок или по просьбе; при фиксе обновляй статусы там.
 
 ## Типичный roadmap (ещё не сделано)
 

@@ -35,6 +35,7 @@
     metricsInterval: $("#metrics-interval"),
     metricsOllama: $("#metrics-ollama"),
     metricsGpu: $("#metrics-gpu"),
+    metricsTemp: $("#metrics-temp"),
     metricsRam: $("#metrics-ram"),
     metricsCpu: $("#metrics-cpu"),
     metricsNote: $("#metrics-note"),
@@ -63,15 +64,20 @@
     panelOpen: true,
     panelWidth: PANEL_DEFAULT,
     metricsTimer: null,
+    metricsInflight: false,
     metricsHistory: {
       cpu: [],
       ram: [],
       gpuUtil: [],
       gpuMem: [],
+      gpuTemp: [],
+      memTemp: [],
     },
     chartHeights: {
       "spark-gpu": SPARK_H_DEFAULT,
       "spark-vram": SPARK_H_DEFAULT,
+      "spark-temp-gpu": SPARK_H_DEFAULT,
+      "spark-temp-mem": SPARK_H_DEFAULT,
       "spark-ram": SPARK_H_DEFAULT,
       "spark-cpu": SPARK_H_DEFAULT,
     },
@@ -111,13 +117,24 @@
       return escapeHtml(src).replace(/\n/g, "<br>");
     }
     const html = marked.parse(src, { async: false });
-    return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+    return DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select", "option"],
+      FORBID_ATTR: ["style", "srcset"],
+    });
   }
 
   function langFromCode(codeEl) {
     const cls = codeEl?.getAttribute?.("class") || codeEl?.className || "";
     const m = String(cls).match(/(?:^|\s)(?:language|lang)-([^\s]+)/i);
-    return m ? decodeURIComponent(m[1]) : "";
+    if (!m) return "";
+    let raw = m[1];
+    try {
+      if (/%[0-9A-Fa-f]{2}/.test(raw)) raw = decodeURIComponent(raw);
+    } catch (_) {
+      /* битый percent-encoding — оставляем как есть */
+    }
+    return raw.replace(/[^a-zA-Z0-9_+#.-]/g, "").slice(0, 40);
   }
 
   function codePlainText(preOrCode) {
@@ -157,6 +174,7 @@
     const lang = langFromCode(code);
     if (!lang) return;
     const mapped = LANG_ALIASES[lang.toLowerCase()] || lang.toLowerCase();
+    if (!/^[a-z0-9_+#.-]+$/i.test(mapped)) return;
     const cls = String(code.className || "").replace(/(?:^|\s)(?:language|lang)-[^\s]+/gi, "").trim();
     code.className = cls;
     code.classList.add("language-" + mapped);
@@ -164,7 +182,7 @@
 
   function highlightCodeBlocks(el, { streaming = false, text = "" } = {}) {
     if (typeof hljs === "undefined") return;
-    const codes = [...el.querySelectorAll(".code-block pre code, pre code")];
+    const codes = [...el.querySelectorAll("pre code")];
     const skipLast = streaming && hasOpenFence(text);
     for (let i = 0; i < codes.length; i++) {
       if (skipLast && i === codes.length - 1) continue;
@@ -237,6 +255,18 @@
       wrap.className = "md-table-wrap";
       table.replaceWith(wrap);
       wrap.appendChild(table);
+    }
+    for (const a of el.querySelectorAll("a[href]")) {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    }
+    for (const img of el.querySelectorAll("img[src]")) {
+      const srcAttr = img.getAttribute("src") || "";
+      if (/^https?:\/\//i.test(srcAttr)) {
+        img.removeAttribute("src");
+        img.setAttribute("alt", img.getAttribute("alt") || "[изображение]");
+        img.classList.add("blocked-remote-img");
+      }
     }
     enhanceCodeBlocks(el);
     highlightCodeBlocks(el, { streaming, text: src });
@@ -557,6 +587,18 @@
     }
   }
 
+  async function persistDraftSlots() {
+    const slots = collectSlotsFromDom();
+    if (!slots.length) return null;
+    return api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        slots,
+        router_model: els.routerModelSelect.value || null,
+      }),
+    });
+  }
+
   async function addModelSlot() {
     const model = els.addSlotModel.value.trim();
     if (!model) {
@@ -565,12 +607,15 @@
     }
     setModelsStatus("Добавление…");
     try {
+      await persistDraftSlots();
       const body = {
         model,
         label: els.addSlotLabel.value.trim() || null,
         router_prompt: els.addSlotPrompt.value.trim() || null,
         id: els.addSlotId.value.trim() || null,
-        rank: Number(els.addSlotRank.value) || 2,
+        rank: Number.isFinite(Number(els.addSlotRank.value))
+          ? Number(els.addSlotRank.value)
+          : 2,
         router_auto: els.addSlotAuto.checked,
       };
       const data = await api("/api/settings/slots", {
@@ -597,6 +642,7 @@
     if (!confirm(`Удалить слот «${id}»?`)) return;
     setModelsStatus("Удаление…");
     try {
+      await persistDraftSlots();
       const data = await api(`/api/settings/slots/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
@@ -803,28 +849,40 @@
   async function clearChat(id) {
     id = id || state.activeId;
     if (!id || state.busy) return;
-    await api(`/api/chats/${id}/clear`, { method: "POST", body: "{}" });
-    if (id === state.activeId) {
-      els.messages.innerHTML = "";
-      els.chatTitle.textContent = "New Chat";
+    if (!confirm("Очистить историю этого чата?")) return;
+    state.selectGen += 1;
+    try {
+      await api(`/api/chats/${id}/clear`, { method: "POST", body: "{}" });
+      if (id === state.activeId) {
+        els.messages.innerHTML = "";
+        els.chatTitle.textContent = "New Chat";
+      }
+      await loadChats();
+    } catch (e) {
+      els.statusLine.textContent = "Ошибка: " + e.message;
     }
-    await loadChats();
   }
 
   async function deleteChat(id) {
     id = id || state.activeId;
     if (!id || state.busy) return;
+    if (!confirm("Удалить этот чат?")) return;
+    state.selectGen += 1;
     const wasActive = id === state.activeId;
-    await api(`/api/chats/${id}`, { method: "DELETE" });
-    if (wasActive) {
-      state.activeId = null;
-      els.messages.innerHTML = "";
-      els.chatTitle.textContent = "New Chat";
-    }
-    await loadChats();
-    if (wasActive) {
-      if (state.chats.length) await selectChat(state.chats[0].id);
-      else renderChatList();
+    try {
+      await api(`/api/chats/${id}`, { method: "DELETE" });
+      if (wasActive) {
+        state.activeId = null;
+        els.messages.innerHTML = "";
+        els.chatTitle.textContent = "New Chat";
+      }
+      await loadChats();
+      if (wasActive) {
+        if (state.chats.length) await selectChat(state.chats[0].id);
+        else renderChatList();
+      }
+    } catch (e) {
+      els.statusLine.textContent = "Ошибка: " + e.message;
     }
   }
 
@@ -845,7 +903,12 @@
       try {
         data = JSON.parse(raw);
       } catch (_) {
-        /* keep string */
+        data = { message: raw || "bad sse json" };
+        event = "error";
+      }
+      if (data == null || typeof data !== "object") {
+        data = { message: String(raw || "bad sse payload") };
+        event = "error";
       }
       events.push({ event, data });
     }
@@ -906,7 +969,7 @@
     } else if (event === "check") {
       ctx.liveMeta = {
         ...ctx.liveMeta,
-        checked: data.checked != null ? !!data.checked : !!data.ok,
+        checked: data.checked != null ? !!data.checked : false,
         problems: data.ok ? [] : data.problems || [],
       };
       metaSlot.innerHTML = metaChips(ctx.liveMeta);
@@ -930,6 +993,7 @@
       line.textContent = `tool ${data.name}(${args})`;
       toolsEl.appendChild(line);
     } else if (event === "done") {
+      ctx.doneReceived = true;
       ctx.liveMeta = {
         tier: data.tier,
         model: data.model,
@@ -973,25 +1037,27 @@
     els.statusLine.textContent = "Роутинг…";
 
     let chatId;
+    let asst = null;
+    const ctx = {
+      liveMeta: {},
+      full: "",
+      bodyEl: null,
+      toolsEl: null,
+      metaSlot: null,
+      doneReceived: false,
+    };
+
     try {
       chatId = await ensureChat();
-    } catch (e) {
-      setBusy(false);
-      els.statusLine.textContent = "Ошибка";
-      return;
-    }
+      els.input.value = "";
+      autosize();
+      appendMessage("user", text);
 
-    els.input.value = "";
-    autosize();
-    appendMessage("user", text);
+      asst = appendMessage("assistant", "", null, { streaming: true });
+      ctx.bodyEl = asst.querySelector(".msg-body");
+      ctx.toolsEl = asst.querySelector(".msg-tools");
+      ctx.metaSlot = asst.querySelector(".msg-meta-slot");
 
-    const asst = appendMessage("assistant", "", null, { streaming: true });
-    const bodyEl = asst.querySelector(".msg-body");
-    const toolsEl = asst.querySelector(".msg-tools");
-    const metaSlot = asst.querySelector(".msg-meta-slot");
-    const ctx = { liveMeta: {}, full: "", bodyEl, toolsEl, metaSlot };
-
-    try {
       const res = await fetch(`/api/chats/${chatId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1017,11 +1083,16 @@
           applySseEvent(event, data, ctx);
         }
       }
+      buf += decoder.decode();
       if (buf.trim()) {
         const { events } = parseSseChunk(buf + "\n\n");
         for (const { event, data } of events) {
           applySseEvent(event, data, ctx);
         }
+      }
+
+      if (!ctx.doneReceived) {
+        throw new Error("Соединение оборвалось до завершения ответа");
       }
 
       asst.classList.remove("streaming");
@@ -1030,16 +1101,20 @@
       const active = state.chats.find((c) => c.id === chatId);
       if (active) els.chatTitle.textContent = active.title;
     } catch (e) {
-      asst.classList.remove("streaming");
+      if (asst) asst.classList.remove("streaming");
       if (ctx._raf) {
         cancelAnimationFrame(ctx._raf);
         ctx._raf = 0;
       }
-      const errLine = "Ошибка: " + e.message;
-      ctx.full = ctx.full ? ctx.full + "\n\n" + errLine : errLine;
-      flushBodyRender(ctx, { streaming: false });
-      els.statusLine.textContent = "Ошибка";
-      metaSlot.innerHTML = `<div class="msg-meta"><span class="chip warn">error</span></div>`;
+      if (ctx.bodyEl && ctx.metaSlot) {
+        const errLine = "Ошибка: " + e.message;
+        ctx.full = ctx.full ? ctx.full + "\n\n" + errLine : errLine;
+        flushBodyRender(ctx, { streaming: false });
+        els.statusLine.textContent = "Ошибка";
+        ctx.metaSlot.innerHTML = `<div class="msg-meta"><span class="chip warn">error</span></div>`;
+      } else {
+        els.statusLine.textContent = "Ошибка: " + (e.message || e);
+      }
     } finally {
       setBusy(false);
       els.input.focus();
@@ -1198,6 +1273,24 @@
     return `${Number(v).toFixed(0)}%`;
   }
 
+  function fmtTemp(v) {
+    if (v == null || Number.isNaN(Number(v))) return "—";
+    return `${Math.round(Number(v))}°C`;
+  }
+
+  function tempBar(cls, temp, scaleMax) {
+    const max = scaleMax && scaleMax > 0 ? Number(scaleMax) : 100;
+    const t = temp == null || Number.isNaN(Number(temp)) ? null : Number(temp);
+    const p = t == null ? 0 : Math.max(0, Math.min(100, (t / max) * 100));
+    let level = "";
+    if (t != null) {
+      if (t >= max * 0.95 || t >= 90) level = " hot";
+      else if (t >= max * 0.85 || t >= 75) level = " warm";
+      else level = " ok";
+    }
+    return `<div class="monitor-bar temp${level} ${cls}"><span style="width:${p}%"></span></div>`;
+  }
+
   function sparkHeight(id) {
     const h = state.chartHeights[id];
     return h != null ? h : SPARK_H_DEFAULT;
@@ -1243,7 +1336,15 @@
     }
   }
 
-  function renderOllama(data) {
+  function fmtModelSize(mb) {
+    if (mb == null || Number.isNaN(Number(mb))) return "—";
+    const n = Number(mb);
+    const gb = n / 1024;
+    if (gb < 0.1) return `${Math.round(n)} МБ`;
+    return `${gb.toFixed(1)} ГБ`;
+  }
+
+  function renderOllama(data, gpus) {
     const box = els.metricsOllama;
     if (!data || !data.ok) {
       box.innerHTML = `<div class="monitor-empty">Ollama: ${escapeHtml(
@@ -1256,28 +1357,51 @@
       box.innerHTML = `<div class="monitor-empty">Нет загруженных моделей</div>`;
       return;
     }
+    // size_vram/size — доля модели на GPU, не заполненность VRAM карты
+    const gpuTotalMb =
+      Array.isArray(gpus) && gpus[0] ? Number(gpus[0].mem_total_mb) || 0 : 0;
     box.innerHTML = models
       .map((m) => {
         const gpuPct = Math.round((m.gpu_ratio || 0) * 100);
         const cpuPct = Math.round((m.cpu_ratio || 0) * 100);
-        const place =
-          m.place === "GPU"
-            ? "100% GPU"
-            : m.place === "CPU"
-              ? "100% CPU"
-              : `${gpuPct}% GPU · ${cpuPct}% CPU`;
+        const sizeMb = Number(m.size_mb) || 0;
+        const vramMb = Number(m.size_vram_mb) || 0;
+        const cpuMb = Math.max(0, sizeMb - vramMb);
+        const cardPct =
+          gpuTotalMb > 0 ? Math.min(100, Math.round((100 * vramMb) / gpuTotalMb)) : null;
+
+        let placeShort;
+        let layersLabel;
+        if (m.place === "GPU" || gpuPct >= 99) {
+          placeShort = "GPU";
+          layersLabel = "слои: все на GPU";
+        } else if (m.place === "CPU" || gpuPct <= 1) {
+          placeShort = "CPU";
+          layersLabel = "слои: все на CPU";
+        } else {
+          placeShort = "hybrid";
+          layersLabel = `слои: ${gpuPct}% GPU · ${cpuPct}% CPU`;
+        }
+
+        const footprint =
+          cpuMb > 1
+            ? `${fmtModelSize(vramMb)} GPU + ${fmtModelSize(cpuMb)} RAM`
+            : `${fmtModelSize(sizeMb)} модель`;
+        const cardShare =
+          cardPct != null ? ` · ${cardPct}% VRAM карты` : "";
+        const detail = `${layersLabel} · ${footprint}${cardShare}`;
+        const splitTitle = `Размещение слоёв модели (не заполненность памяти): ${layersLabel}`;
+
         return `<div class="monitor-card">
           <div class="monitor-metric-head">
             <span class="monitor-metric-name" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}</span>
-            <span class="monitor-metric-value">${escapeHtml(m.place || "?")}</span>
+            <span class="monitor-metric-value">${escapeHtml(placeShort)}</span>
           </div>
-          <div class="monitor-split" title="${escapeHtml(place)}">
+          <div class="monitor-split" title="${escapeHtml(splitTitle)}">
             <span class="gpu-part" style="width:${gpuPct}%"></span>
             <span class="cpu-part" style="width:${cpuPct}%"></span>
           </div>
-          <div class="monitor-place">${escapeHtml(place)} · VRAM ${escapeHtml(
-            String(m.size_vram_mb ?? "—")
-          )} / ${escapeHtml(String(m.size_mb ?? "—"))} МБ</div>
+          <div class="monitor-place">${escapeHtml(detail)}</div>
         </div>`;
       })
       .join("");
@@ -1315,6 +1439,78 @@
       </div>`;
     paintSpark("spark-gpu", state.metricsHistory.gpuUtil, chartColor("--chart-gpu", "#4a9eff"));
     paintSpark("spark-vram", state.metricsHistory.gpuMem, chartColor("--chart-vram", "#7ec699"));
+  }
+
+  function renderTemps(gpus) {
+    const box = els.metricsTemp;
+    if (!gpus || !gpus.length) {
+      pushHistory("gpuTemp", null);
+      pushHistory("memTemp", null);
+      box.innerHTML = `<div class="monitor-empty">Нет данных температуры (нужен nvidia-smi)</div>
+        ${sparkHtml("spark-temp-gpu", "GPU °C")}`;
+      paintSpark(
+        "spark-temp-gpu",
+        state.metricsHistory.gpuTemp,
+        chartColor("--chart-temp-gpu", "#f0a050")
+      );
+      return;
+    }
+    const g = gpus[0];
+    pushHistory("gpuTemp", g.temp_gpu_c != null ? Number(g.temp_gpu_c) : null);
+    pushHistory("memTemp", g.temp_memory_c != null ? Number(g.temp_memory_c) : null);
+    const scale = g.temp_max_op_c || g.temp_shutdown_c || 100;
+    const memScale = g.temp_memory_max_c || scale;
+    const limits = [
+      g.temp_target_c != null ? `цель ${fmtTemp(g.temp_target_c)}` : null,
+      g.temp_max_op_c != null ? `макс ${fmtTemp(g.temp_max_op_c)}` : null,
+      g.temp_slowdown_c != null ? `троттлинг ${fmtTemp(g.temp_slowdown_c)}` : null,
+      g.temp_shutdown_c != null ? `выкл. ${fmtTemp(g.temp_shutdown_c)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    const memRow =
+      g.temp_memory_c != null
+        ? `${tempBar("temp-mem", g.temp_memory_c, memScale)}
+        ${sparkHtml("spark-temp-mem", "Memory °C")}`
+        : `<div class="monitor-place">не отдаёт драйвер (часто на GDDR; HBM обычно есть)</div>`;
+
+    const tlimit =
+      g.temp_tlimit_c != null
+        ? `<div class="monitor-metric-head">
+            <span class="monitor-metric-name">T.Limit</span>
+            <span class="monitor-metric-value">${fmtTemp(g.temp_tlimit_c)}</span>
+          </div>`
+        : "";
+
+    box.innerHTML = `
+      <div class="monitor-card">
+        <div class="monitor-metric-head">
+          <span class="monitor-metric-name" title="${escapeHtml(g.name || "GPU")}">GPU (ядро)</span>
+          <span class="monitor-metric-value">${fmtTemp(g.temp_gpu_c)}</span>
+        </div>
+        ${tempBar("temp-gpu", g.temp_gpu_c, scale)}
+        ${sparkHtml("spark-temp-gpu", "GPU °C")}
+        <div class="monitor-metric-head">
+          <span class="monitor-metric-name" title="Температура цепей видеопамяти">Память (цепи VRAM)</span>
+          <span class="monitor-metric-value">${fmtTemp(g.temp_memory_c)}</span>
+        </div>
+        ${memRow}
+        ${tlimit}
+        ${limits ? `<div class="monitor-place">${escapeHtml(limits)}</div>` : ""}
+      </div>`;
+    paintSpark(
+      "spark-temp-gpu",
+      state.metricsHistory.gpuTemp,
+      chartColor("--chart-temp-gpu", "#f0a050")
+    );
+    if (g.temp_memory_c != null) {
+      paintSpark(
+        "spark-temp-mem",
+        state.metricsHistory.memTemp,
+        chartColor("--chart-temp-mem", "#e8c96a")
+      );
+    }
   }
 
   function renderRam(ram) {
@@ -1359,11 +1555,14 @@
   }
 
   async function refreshMetrics() {
-    if (!state.panelOpen) return;
+    if (!state.panelOpen || state.metricsInflight) return;
+    state.metricsInflight = true;
     try {
       const data = await api("/api/metrics");
-      renderOllama(data.ollama);
+      if (!state.panelOpen) return;
+      renderOllama(data.ollama, data.gpu);
       renderGpu(data.gpu);
+      renderTemps(data.gpu);
       renderRam(data.ram);
       renderCpu(data.cpu);
       if (data.note) {
@@ -1374,13 +1573,17 @@
         els.metricsNote.textContent = "";
       }
     } catch (e) {
-      els.metricsOllama.innerHTML = `<div class="monitor-empty">Ошибка: ${escapeHtml(e.message)}</div>`;
+      if (state.panelOpen) {
+        els.metricsOllama.innerHTML = `<div class="monitor-empty">Ошибка: ${escapeHtml(e.message)}</div>`;
+      }
+    } finally {
+      state.metricsInflight = false;
     }
   }
 
   function stopMetricsPoll() {
     if (state.metricsTimer) {
-      clearInterval(state.metricsTimer);
+      clearTimeout(state.metricsTimer);
       state.metricsTimer = null;
     }
   }
@@ -1388,13 +1591,18 @@
   function startMetricsPoll() {
     stopMetricsPoll();
     if (!state.panelOpen) return;
-    const ms = Number(els.metricsInterval.value) || 2000;
-    refreshMetrics();
-    state.metricsTimer = setInterval(refreshMetrics, ms);
+    const tick = async () => {
+      await refreshMetrics();
+      if (!state.panelOpen) return;
+      const ms = Number(els.metricsInterval.value) || 2000;
+      state.metricsTimer = setTimeout(tick, ms);
+    };
+    tick();
   }
 
   function panelMaxWidth() {
-    return Math.max(PANEL_MIN, Math.min(PANEL_MAX_CAP, window.innerWidth - 280));
+    // sidebar (~260) + минимальный чат (~320)
+    return Math.max(PANEL_MIN, Math.min(PANEL_MAX_CAP, window.innerWidth - 580));
   }
 
   function applyPanelWidth(px) {
@@ -1458,6 +1666,7 @@
       }
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
 
     els.panelResizer.addEventListener("pointerdown", (e) => {
@@ -1470,6 +1679,7 @@
       els.panelResizer.setPointerCapture?.(e.pointerId);
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     });
 
     window.addEventListener("resize", () => {
@@ -1486,12 +1696,16 @@
     const historyKey = {
       "spark-gpu": "gpuUtil",
       "spark-vram": "gpuMem",
+      "spark-temp-gpu": "gpuTemp",
+      "spark-temp-mem": "memTemp",
       "spark-ram": "ram",
       "spark-cpu": "cpu",
     };
     const colorKey = {
       "spark-gpu": ["--chart-gpu", "#4a9eff"],
       "spark-vram": ["--chart-vram", "#7ec699"],
+      "spark-temp-gpu": ["--chart-temp-gpu", "#f0a050"],
+      "spark-temp-mem": ["--chart-temp-mem", "#e8c96a"],
       "spark-ram": ["--chart-ram", "#d4a574"],
       "spark-cpu": ["--chart-cpu", "#e06c75"],
     };
@@ -1521,6 +1735,7 @@
       saveChartHeights();
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
 
     els.monitorPanel.addEventListener("pointerdown", (e) => {
@@ -1537,6 +1752,7 @@
       handle.setPointerCapture?.(e.pointerId);
       window.addEventListener("pointermove", onMove);
       window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
     });
   }
 
@@ -1571,6 +1787,10 @@
     initPanelResize();
     initSparkResize();
     setPanelOpen(open);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) stopMetricsPoll();
+      else if (state.panelOpen) startMetricsPoll();
+    });
   }
 
   async function init() {

@@ -204,18 +204,23 @@ def _fmt_number(value: float) -> str:
 def _mentions_number(answer: str, value: float) -> bool:
     """Ищем число как отдельный токен, а не подстроку (`2` ≠ `20` / `12`)."""
     text = (answer or "").replace("\u2212", "-").replace("\u00a0", " ")
-    # Убираем только разделители тысяч внутри чисел, пробелы оставляем как границы
-    text = re.sub(r"(?<=\d)[,'’](?=\d)", "", text)
+    # Разделители тысяч: 1,000 / 1 000 — не трогаем десятичную запятую 2,5
+    text = re.sub(r"(?<=\d)[ '’](?=\d{3}(?:\D|$))", "", text)
+    text = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", text)
+    # Нормализация десятичной запятой для поиска: 2,5 → 2.5
+    text_dot = re.sub(r"(\d),(\d)", r"\1.\2", text)
     variants = {_fmt_number(value)}
     if abs(value - round(value)) >= 1e-9:
         variants.add(f"{value:.2f}".rstrip("0").rstrip("."))
         variants.add(f"{value:.4f}".rstrip("0").rstrip("."))
+        variants.add(_fmt_number(value).replace(".", ","))
     for v in variants:
-        if re.search(
-            rf"(?<![A-Za-zА-Яа-яЁё0-9.]){re.escape(v)}(?![A-Za-zА-Яа-яЁё0-9.])",
-            text,
-        ):
-            return True
+        for hay in (text, text_dot):
+            if re.search(
+                rf"(?<![A-Za-zА-Яа-яЁё0-9.]){re.escape(v)}(?![A-Za-zА-Яа-яЁё0-9.])",
+                hay,
+            ):
+                return True
     return False
 
 
@@ -223,7 +228,7 @@ def arithmetic_problems(user_text: str, answer: str) -> tuple[list[str], str, bo
     """Считаем выражение из вопроса сами и сверяем с ответом.
 
     Возвращает `(problems, note, verified)`. `verified=True` — ответ содержит
-    верное значение, дальше LLM-ревью не нужно (оно тут только шумит).
+    верное значение; LLM-ревью можно пропустить только для почти чистой арифметики.
     """
     if not _MATH_QUESTION_RE.search(user_text):
         return [], "", False
@@ -238,6 +243,14 @@ def arithmetic_problems(user_text: str, answer: str) -> tuple[list[str], str, bo
             return ["error"], f"Правильное значение: {expr} = {_fmt_number(value)}.", False
         verified = True
     return [], "", verified
+
+
+def _math_only_question(user_text: str) -> bool:
+    """Вопрос почти целиком про вычисление — без доп. частей вроде «и объясни»."""
+    rest = _MATH_QUESTION_RE.sub(" ", user_text or "")
+    rest = _EXPR_RE.sub(" ", rest)
+    rest = re.sub(r"[\s.,;:!?()\-+=*/×xх^]+", " ", rest, flags=re.IGNORECASE).strip()
+    return len(rest) < 16
 
 
 def _has_loop(text: str) -> bool:
@@ -288,6 +301,14 @@ def language_problems(user_text: str, answer: str) -> list[str]:
         answer_lat = _ratio(_LAT_RE, answer)
         # латиница может быть кодом/терминами, поэтому порог мягкий
         if answer_cyr < 0.15 and (answer_lat > 0.5 or answer_cjk > 0.02):
+            problems.append("language")
+
+    # Симметрично: английский вопрос → ответ почти целиком на русском
+    user_lat = _ratio(_LAT_RE, user_text)
+    if user_lat > 0.5 and user_cyr < 0.15 and len(answer) > 40:
+        answer_cyr = _ratio(_CYR_RE, answer)
+        answer_lat = _ratio(_LAT_RE, answer)
+        if answer_cyr > 0.5 and answer_lat < 0.2:
             problems.append("language")
 
     return problems
@@ -380,7 +401,7 @@ def check(
     math_problems, math_note, math_verified = arithmetic_problems(user_text, answer)
     if math_problems:
         return Verdict(False, math_problems, math_note)
-    if math_verified:
+    if math_verified and _math_only_question(user_text):
         return Verdict(True, note="math-verified")
 
     if use_llm and model and len(answer.strip()) >= 40:

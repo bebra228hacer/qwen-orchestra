@@ -6,45 +6,11 @@
 
 from __future__ import annotations
 
-import json
 import urllib.error
-import urllib.request
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+from llm import chat_stream
+
 MODEL = "qwen3.5:4b"
-
-
-def chat(messages: list[dict[str, str]], stream: bool = True) -> str:
-    payload = json.dumps(
-        {"model": MODEL, "messages": messages, "stream": stream, "think": False}
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        OLLAMA_URL,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    if not stream:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data["message"]["content"]
-
-    full = []
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        for raw_line in resp:
-            line = raw_line.decode("utf-8").strip()
-            if not line:
-                continue
-            chunk = json.loads(line)
-            part = chunk.get("message", {}).get("content", "")
-            if part:
-                print(part, end="", flush=True)
-                full.append(part)
-            if chunk.get("done"):
-                break
-    print()
-    return "".join(full)
 
 
 def main() -> None:
@@ -67,7 +33,13 @@ def main() -> None:
         messages.append({"role": "user", "content": user})
         print("Qwen: ", end="", flush=True)
         try:
-            reply = chat(messages)
+            reply = chat_stream(
+                MODEL,
+                messages,
+                on_token=lambda t: print(t, end="", flush=True),
+                temperature=0.3,
+            )
+            print()
         except urllib.error.URLError as exc:
             print(f"\nОшибка: не удалось подключиться к Ollama ({exc}).")
             print("Убедитесь, что Ollama запущена (обычно после установки она в трее).")

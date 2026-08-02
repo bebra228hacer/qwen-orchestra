@@ -180,6 +180,13 @@ def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
     return next(iter(available))
 
 
+def _escalate_sort_key(t: Tier) -> tuple[int, int, str]:
+    """Порядок эскалации: rank ↑, при равном rank — xlarge раньше coder."""
+    # coder — боковая ветка той же «весовой» полки; общий анализ → xlarge
+    coder_last = 1 if t == "coder" else 0
+    return (_rank(t), coder_last, t)
+
+
 def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
     """Следующий установленный тир при эскалации: coder → xlarge, иначе по лестнице."""
     if available is None:
@@ -198,7 +205,14 @@ def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
                 return cand
         return None
 
-    ranked = sorted(available, key=lambda t: (_rank(t), t))
+    # Сначала лестница TIER_ORDER (xlarge без coder), затем кастомные слоты выше по rank
+    if tier in TIER_ORDER:
+        idx = TIER_ORDER.index(tier)
+        for cand in TIER_ORDER[idx + 1 :]:
+            if cand in available:
+                return cand
+
+    ranked = sorted(available, key=_escalate_sort_key)
     for cand in ranked:
         if _rank(cand) > _rank(tier):
             return cand
@@ -408,14 +422,15 @@ def _worker_with_tools(
     messages = _build_messages(user_text, history, retry_hint)
     cache = tool_cache if tool_cache is not None else {}
     calls_done = 0
-    # Бюджет символов под evidence: доля окна минус уже занятый промпт
-    prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+    # Бюджет в символах из остатка токенов окна (оценка ~2 символа/токен)
+    prompt_tok = sum(_estimate_tokens(str(m.get("content") or "")) for m in messages)
+    remain_tok = max(
+        256,
+        num_ctx - prompt_tok - CTX_TEMPLATE_TOKENS - max(256, CTX_OUT_NORMAL // 2),
+    )
     tool_budget = max(
         1200,
-        min(
-            TOOL_RESULT_CHARS * 2,
-            int((num_ctx * 2) * CTX_TOOL_BUDGET_RATIO) - prompt_chars // 4,
-        ),
+        min(TOOL_RESULT_CHARS * 2, int(remain_tok * 2 * CTX_TOOL_BUDGET_RATIO)),
     )
 
     for _ in range(MAX_TOOL_ROUNDS):
@@ -593,6 +608,14 @@ def handle(
     if on_status is None and verbose:
         on_status = _cli_status_printer(verbose)
 
+    # Снимок слотов на весь запрос — hot-reload settings не ломает цикл попыток
+    with app_settings.runtime_lock:
+        models = dict(MODELS)
+        selfcheck_model = SELFCHECK_MODEL
+
+    def _model(tier: Tier) -> str:
+        return models.get(tier) or MODELS.get(tier, "")
+
     try:
         installed = set(installed_models())
     except Exception as exc:  # noqa: BLE001
@@ -606,8 +629,8 @@ def handle(
             raise ValueError(f"Неизвестный tier: {force_tier}")
         if force_tier not in available:
             raise ValueError(
-                f"Модель {MODELS[force_tier]} не установлена. "
-                f"Установите: ollama pull {MODELS[force_tier]}"
+                f"Модель {_model(force_tier)} не установлена. "
+                f"Установите: ollama pull {_model(force_tier)}"
             )
         # Ручной тир — без LLM-роутера
         decision = RouteDecision(
@@ -637,7 +660,7 @@ def handle(
         tier=decision.tier,
         need_web=decision.need_web,
         reason=decision.reason,
-        model=MODELS.get(decision.tier, MODELS["tiny"]),
+        model=_model(decision.tier) or _model("tiny"),
     )
 
     if not decision.ok:
@@ -648,26 +671,40 @@ def handle(
         return OrchestraResult(
             text=text,
             tier="tiny",
-            model=MODELS["tiny"],
+            model=_model("tiny"),
             need_web=False,
             route_reason=decision.reason,
             checked=False,
         )
 
     start_tier: Tier = decision.tier
+    attempts: list[_Attempt] = []
+    retry_hint: str | None = None
 
     # Короткий ответ роутера — тоже под проверкой; не прошёл → идём к воркеру
     if decision.tier == "tiny" and decision.reply:
         verdict = selfcheck.check(
             user_text, decision.reply, model=None, expect_detail=False, use_llm=False
         )
+        tiny_ctx = ContextPlan(history=[], num_ctx=NUM_CTX_MIN, use_history=False, reason="tiny-reply")
+        attempts.append(
+            _Attempt(
+                text=decision.reply,
+                verdict=verdict,
+                tier="tiny",
+                model=_model("tiny"),
+                ctx=tiny_ctx,
+            )
+        )
         _emit(
             on_status,
             "selfcheck",
             ok=verdict.ok,
             problems=verdict.problems,
+            note=verdict.note,
             attempt=1,
-            model=MODELS["tiny"],
+            model=_model("tiny"),
+            checked=verdict.checked,
         )
         if verdict.ok:
             _emit_token(on_token, decision.reply)
@@ -676,9 +713,12 @@ def handle(
             return OrchestraResult(
                 text=decision.reply,
                 tier="tiny",
-                model=MODELS["tiny"],
+                model=_model("tiny"),
                 need_web=False,
                 route_reason=decision.reason,
+                attempts=1,
+                checked=verdict.checked,
+                problems=list(verdict.problems),
             )
         mid = _fit_tier("mid", available)
         _emit(
@@ -686,22 +726,24 @@ def handle(
             "retry",
             attempt=2,
             problems=verdict.problems,
-            from_model=MODELS["tiny"],
-            to_model=MODELS[mid],
+            from_model=_model("tiny"),
+            to_model=_model(mid),
         )
+        retry_hint = verdict.hint
         decision = RouteDecision(
             True, mid, decision.need_web, decision.reason + " +recheck", ""
         )
 
     tier: Tier = decision.tier
-    retry_hint: str | None = None
-    attempts: list[_Attempt] = []
     tool_cache: dict[str, str] = {}
     ctx_plan = plan_worker_context(user_text, history, tier)
     _emit_context(on_status, ctx_plan, tier)
+    # Уже потраченная tiny-попытка учитывается в нумерации и лимите
+    attempt_base = len(attempts)
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        model = MODELS[tier]
+    for attempt in range(1, MAX_ATTEMPTS + 1 - attempt_base):
+        model = _model(tier)
+        attempt_no = attempt_base + attempt
         # При эскалации на сложный тир пересчитываем ctx (tiny/mid → xlarge)
         if attempt > 1:
             ctx_plan = plan_worker_context(user_text, history, tier)
@@ -712,7 +754,7 @@ def handle(
             model=model,
             need_web=decision.need_web,
             tier=tier,
-            attempt=attempt,
+            attempt=attempt_no,
             num_ctx=ctx_plan.num_ctx,
             used_history=ctx_plan.use_history,
         )
@@ -741,10 +783,11 @@ def handle(
             )
 
         # LLM-ревью и на последней попытке — иначе checked врёт
+        review_model = selfcheck_model if selfcheck_model in installed else None
         verdict = selfcheck.check(
             user_text,
             text,
-            model=SELFCHECK_MODEL if SELFCHECK_MODEL in installed else None,
+            model=review_model,
             expect_detail=tier != "tiny",
             use_llm=SELFCHECK_LLM,
         )
@@ -757,12 +800,12 @@ def handle(
             ok=verdict.ok,
             problems=verdict.problems,
             note=verdict.note,
-            attempt=attempt,
+            attempt=attempt_no,
             model=model,
             checked=verdict.checked,
         )
 
-        if verdict.ok or attempt == MAX_ATTEMPTS:
+        if verdict.ok or attempt_no >= MAX_ATTEMPTS:
             break
 
         next_tier = _next_tier(tier, available)
@@ -772,11 +815,11 @@ def handle(
         _emit(
             on_status,
             "retry",
-            attempt=attempt + 1,
+            attempt=attempt_no + 1,
             problems=verdict.problems,
             reason=verdict.summary(),
             from_model=model,
-            to_model=MODELS[next_tier],
+            to_model=_model(next_tier),
         )
         retry_hint = verdict.hint
         tier = next_tier

@@ -97,7 +97,7 @@ _WEB_KEYS = (
     "курс доллар",
     "курс евро",
     "сегодня",
-    "сейчас",
+    "сколько сейчас",
     "актуальн",
     "weather",
     "news",
@@ -259,7 +259,7 @@ _BRIEF_RE = re.compile(
 _SOFT_WEB_RE = re.compile(
     r"(?:"
     r"последн|нов(?:ый|ая|ое|ые|ости)|верси(?:я|и|ю)|релиз|стоимост|"
-    r"\bкурс\b|когда\s|дата\b|кто такой|"
+    r"\bкурс\b|когда\s+(?:будет|выйдет|откро|закры|выходит|релиз)|дата\b|кто такой|"
     r"рейтинг|статистик|прогноз|расписани|сколько сейчас|"
     r"поищи|погугли|найди\s+в\s+(?:интернет|сети)|look\s+up|search\s+(?:the\s+)?(?:web|online)|"
     r"цена\b"
@@ -267,10 +267,12 @@ _SOFT_WEB_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Независимые требования («A, B и C» / «также» / нумерованный список)
+# Независимые требования («A, и B» / «также» / нумерованный список) —
+# голая запятая в тексте/коде не считается отдельным требованием
 _REQUIREMENT_RE = re.compile(
     r"(?:"
-    r"[,;]\s*(?:и\s+|а\s+также\s+|также\s+|плюс\s+|ещё\s+)?"
+    r",\s*(?:и|а\s+также|также|плюс|ещё)\s+"
+    r"|;\s+(?:и\s+|а\s+также\s+|также\s+)?"
     r"|\bтакже\b|\bплюс\b|\badditionally\b|\balso\b|"
     r"(?:^|\n)\s*(?:\d+[\.\)]\s+|[-*•]\s+)"
     r")",
@@ -585,8 +587,6 @@ def route(user_text: str) -> RouteDecision:
     tier_raw = str(data.get("tier") or "mid").lower().strip()
     if tier_raw in ALL_TIERS:
         tier: Tier = tier_raw
-    elif tier_raw in ROUTER_AUTO_TIERS:
-        tier = tier_raw
     else:
         tier = "mid" if "mid" in ALL_TIERS else next(iter(ALL_TIERS), "mid")
     need = web or (

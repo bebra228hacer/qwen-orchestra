@@ -179,7 +179,7 @@ num_ctx = ceil_256(tokens(промпт) + 128 + reserve_ответа + safety) �
 | `router.py` | Выбор tier + валидация |
 | `selfcheck.py` | Самопроверка ответа |
 | `llm.py` | Клиент Ollama (`num_ctx` в options) |
-| `metrics.py` | Метрики CPU/RAM/GPU + Ollama `/api/ps` |
+| `metrics.py` | Метрики CPU/RAM/GPU/температуры + Ollama `/api/ps` |
 | `server.py` | FastAPI + SSE + `/api/metrics`, порт `8787` |
 | `web/` | Тёмный Cursor-like UI (чат + правая панель монитора) |
 | `open_web.py` | Лаунчер: Ollama (если нужно) + сервер + браузер |
