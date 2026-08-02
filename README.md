@@ -12,7 +12,7 @@
 
 Большинство mid/heavy/web/coder запросов роутятся **без** вызова tiny (детерминированные правила). Ручной тир в UI тоже не дергает роутер. Эскалация не падает на неустановленный 14b. У Qwen3.5 thinking **выключен** (`think: false`) — иначе ломаются JSON-роутер и tools.
 
-Слоты моделей и **промпты роутера** («когда какую модель выбирать») настраиваются в UI: кнопка **«Модели и промпты»** в сайдбаре. Можно сменить Ollama-имя у builtin-слотов, отредактировать текст для Auto и **добавить свою нейронку** из установленных в Ollama. Defaults и файл `settings.json` — модуль `settings.py`.
+Слоты моделей и **промпты роутера** («когда какую модель выбирать») настраиваются в UI: кнопка **«Модели и промпты»** в сайдбаре (справка по **?**). Можно выбрать **модель роутера**, сменить Ollama-имя у слотов, отредактировать тексты для Auto и **добавить свою нейронку**. Defaults и файл `settings.json` — модуль `settings.py`.
 
 Поток одного запроса:
 
@@ -32,6 +32,27 @@ user → route → plan context (история + num_ctx) → worker (± web)
 - [Python 3.10+](https://www.python.org/downloads/) в `PATH`
 - [Ollama](https://ollama.com/download) (лаунчер сам поднимет `ollama serve`, если сервис не запущен)
 - Для 14b желательно ≥8 ГБ VRAM (на 8 ГБ возможен CPU/GPU hybrid и ниже скорость)
+
+### Python (бэкенд)
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Пакеты: `fastapi`, `uvicorn`, `pydantic`, `ddgs` (и транзитивные зависимости из `requirements.txt`).
+
+### Фронтенд-библиотеки (уже в репозитории)
+
+Веб-чат **не** требует `npm` / CDN: минифицированные файлы лежат в `web/vendor/` и отдаются как статика (`/static/vendor/…`).
+
+| Файл | Библиотека | Зачем |
+|------|------------|--------|
+| `web/vendor/marked.min.js` | [marked](https://github.com/markedjs/marked) v15 | Markdown → HTML (GFM) |
+| `web/vendor/purify.min.js` | [DOMPurify](https://github.com/cure53/DOMPurify) v3 | Санитизация HTML (XSS) |
+| `web/vendor/highlight.min.js` | [highlight.js](https://github.com/highlightjs/highlight.js) v11 | Подсветка синтаксиса в блоках кода |
+| `web/vendor/highlight-github-dark.min.css` | hljs theme **GitHub Dark** | Цвета токенов под тёмный UI |
+
+Подключаются из `web/index.html`. Обновлять версии — скачать те же артефакты с jsDelivr / CDN release и заменить файлы в `web/vendor/`.
 
 ---
 
@@ -94,7 +115,8 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 
 ### Веб-UI
 
-- Слева — чаты, снизу — Composer
+- Слева — чаты (очистка/удаление у каждого пункта), снизу — Composer
+- Ответы и сообщения рендерятся как **Markdown** (GFM: код, списки, таблицы; `marked` + `DOMPurify` + подсветка `highlight.js` в `web/vendor/`)
 - Селектор **Auto / tiny / mid / heavy / xlarge / coder**
 - Чипы: tier, модель, `ctx N`, `история` / `без истории`, `проверено`, `попыток: N`
 - Health: обязательные модели отдельно; 14b — «опционально», если не скачаны

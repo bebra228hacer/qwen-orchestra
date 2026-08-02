@@ -14,6 +14,11 @@
 2. Модели: `qwen3.5:0.8b`, `qwen3.5:4b`, `qwen3.5:9b` (`ollama pull …`).
 3. Опционально: `qwen2.5:14b`, `qwen2.5-coder:14b` (тиры `xlarge` / `coder`, Q4_K_M ~9 ГБ).
 4. Python deps: `pip install -r requirements.txt` (`ddgs`, `fastapi`, `uvicorn`, `pydantic`).
+5. Фронтенд (vendored, без npm): см. `web/vendor/` —
+   - `marked.min.js` — Markdown (GFM);
+   - `purify.min.js` — DOMPurify, санитизация HTML;
+   - `highlight.min.js` + `highlight-github-dark.min.css` — подсветка кода.
+   Подключение в `web/index.html`; CDN не нужен (офлайн-чат).
 
 На GPU ~8 ГБ VRAM 14b часто идёт как hybrid CPU/GPU — скорость ниже, чем у 9b на 100% GPU.
 
@@ -33,6 +38,7 @@
 | `chat_web.py` / `ask_web.py` | Только mid + web tools |
 | `server.py` | FastAPI: статика + API чатов + SSE + `/api/settings` |
 | `web/` | UI: `index.html`, `styles.css`, `app.js` |
+| `web/vendor/` | Фронт-библиотеки: marked, DOMPurify, highlight.js (+ тема) |
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
 | `QwenChat.exe` / `QwenChat.bat` | Сборка/обёртка лаунчера |
 | `start.bat` | Меню режимов (CP866, `cd /d "%~dp0"`) |
@@ -163,7 +169,7 @@ Web-tool результаты **кэшируются** между retry (пов�
 |---|---|---|
 | GET | `/api/ready` | Быстрый ping (лаунчер; **без** Ollama) |
 | GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `slots` |
-| GET/PUT | `/api/settings` | Слоты моделей + промпты роутера (`settings.json`) |
+| GET/PUT | `/api/settings` | Слоты моделей + `router_model` + промпты роутера (`settings.json`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
 | POST | `/api/settings/slots` | Добавить нейронку в список |
 | DELETE | `/api/settings/slots/{id}` | Удалить пользовательский слот |

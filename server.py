@@ -52,6 +52,7 @@ class SendMessageBody(BaseModel):
 
 class SettingsPutBody(BaseModel):
     slots: list[dict[str, Any]]
+    router_model: str | None = None
 
 
 class AddSlotBody(BaseModel):
@@ -156,7 +157,7 @@ def get_settings() -> dict[str, Any]:
 @app.put("/api/settings")
 def put_settings(body: SettingsPutBody) -> dict[str, Any]:
     try:
-        saved = app_settings.update_slots(body.slots)
+        saved = app_settings.update_settings(body.slots, router_model=body.router_model)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return app_settings.public_settings_payload(saved)

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Qwen Orchestra</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/vendor/highlight-github-dark.min.css" />
 </head>
 <body>
   <div class="app">
@@ -29,10 +30,6 @@
     <main class="main">
       <header class="main-header">
         <h1 class="chat-title" id="chat-title">New Chat</h1>
-        <div class="header-actions">
-          <button type="button" class="btn btn-ghost" id="btn-clear" title="Очистить чат">Clear</button>
-          <button type="button" class="btn btn-ghost danger" id="btn-delete" title="Удалить чат">Delete</button>
-        </div>
       </header>
 
       <section class="messages" id="messages" aria-live="polite"></section>
@@ -56,8 +53,52 @@
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="models-modal-title">
       <header class="modal-header">
         <h2 id="models-modal-title">Модели и промпты роутера</h2>
-        <button type="button" class="btn btn-ghost" id="btn-models-close" title="Закрыть">✕</button>
+        <div class="modal-header-actions">
+          <button type="button" class="btn btn-ghost btn-icon" id="btn-models-help" title="Справка" aria-expanded="false" aria-controls="models-help">?</button>
+          <button type="button" class="btn btn-ghost btn-icon" id="btn-models-close" title="Закрыть">✕</button>
+        </div>
       </header>
+      <div class="models-help" id="models-help" hidden>
+        <h3>Как пользоваться</h3>
+        <p>
+          Здесь настраивается список нейронок оркестра и правила Auto:
+          какая модель отвечает на запрос. Сначала выберите
+          <strong>модель роутера</strong> — она решает, какой слот взять,
+          когда срабатывает LLM-роутинг (неоднозначные короткие запросы
+          и ваши кастомные auto-слоты).
+        </p>
+        <h3>Слоты</h3>
+        <ul>
+          <li><strong>Модель</strong> — тег Ollama, который реально вызывается.</li>
+          <li><strong>Подпись</strong> — как слот выглядит в селекторе Tier.</li>
+          <li><strong>Промпт</strong> — текст для роутера: <em>когда выбирать этот слот</em>. Пишите конкретно: типы задач, ключевые слова, чего избегать.</li>
+          <li><strong>Участвует в Auto</strong> — роутер может выбрать слот сам. Иначе только вручную или через эскалацию.</li>
+        </ul>
+        <h3>Rank</h3>
+        <p>
+          Число «силы» слота для эскалации после самопроверки (чем больше — тем сильнее).
+          Ориентир по умолчанию: tiny=0, mid=1, heavy=2, xlarge/coder=3.
+          При провале ответа оркестр поднимается на слот с большим rank.
+          Одинаковый rank — порядок по id; coder — отдельная ветка для кода.
+        </p>
+        <h3>Добавить нейронку</h3>
+        <p>
+          Сначала <code>ollama pull …</code>, затем выберите модель в форме ниже,
+          задайте id (необяз.), rank, промпт и сохраните. Builtin-слоты
+          (tiny…coder) удалить нельзя — только сменить модель и тексты.
+        </p>
+        <h3>Сохранение</h3>
+        <p>
+          «Сохранить» пишет <code>settings.json</code> и сразу применяет настройки.
+          «Сбросить по умолчанию» возвращает стандартные слоты, промпты и роутер tiny.
+        </p>
+      </div>
+      <div class="router-model-row">
+        <div class="field-with-label">
+          <label class="field-label" for="router-model-select">Модель роутера (Auto)</label>
+          <select id="router-model-select" class="tier-select" title="Какая модель решает tier в Auto"></select>
+        </div>
+      </div>
       <p class="modal-hint">
         Для каждой нейронки — когда Auto её выбирает. Builtin-слоты нельзя удалить;
         можно сменить модель Ollama и текст промпта. Новые слоты — кнопка ниже.
@@ -68,7 +109,10 @@
         <div class="add-slot-row">
           <select id="add-slot-model" class="tier-select" title="Модель из Ollama"></select>
           <input id="add-slot-id" class="text-input" type="text" placeholder="id (необяз.)" maxlength="32" />
-          <input id="add-slot-rank" class="text-input rank-input" type="number" value="2" min="0" max="9" title="rank" />
+          <div class="field-with-label rank-field">
+            <label class="field-label" for="add-slot-rank">Rank</label>
+            <input id="add-slot-rank" class="text-input rank-input" type="number" value="2" min="0" max="9" title="Сила / порядок эскалации" />
+          </div>
         </div>
         <input id="add-slot-label" class="text-input" type="text" placeholder="Подпись в списке" />
         <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Когда роутеру выбирать эту модель…"></textarea>
@@ -84,6 +128,9 @@
       <div class="modal-status" id="models-status"></div>
     </div>
   </div>
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/vendor/highlight.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

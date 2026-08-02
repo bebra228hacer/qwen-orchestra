@@ -12,6 +12,7 @@ alwaysApply: true
 - Ядро: `orchestra.handle` ← `router.py` + `selfcheck.py` + `llm.py` + `tools_web.py` + `settings.py`
 - Цикл: `route → plan_worker_context → worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/`
+- UI Markdown/код: vendored `web/vendor/` — marked, DOMPurify, highlight.js (без npm/CDN)
 - Лаунчер: `open_web.py` / `QwenChat.exe` (при необходимости `ollama serve`, ждёт `/api/ready`, открывает браузер; свою Ollama гасит при выходе)
 
 ## Тиры

@@ -104,6 +104,8 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
     },
 ]
 
+DEFAULT_ROUTER_MODEL = "qwen3.5:0.8b"
+
 ROUTER_SYSTEM_HEADER = """Ты роутер запросов. Отвечай ТОЛЬКО валидным JSON без markdown.
 
 Поля:
@@ -145,12 +147,21 @@ class ModelSlot:
 @dataclass
 class AppSettings:
     slots: list[ModelSlot] = field(default_factory=list)
+    router_model: str = DEFAULT_ROUTER_MODEL
 
     def to_dict(self) -> dict[str, Any]:
-        return {"slots": [s.to_dict() for s in self.slots]}
+        return {
+            "router_model": self.router_model,
+            "slots": [s.to_dict() for s in self.slots],
+        }
 
 
 _settings: AppSettings | None = None
+
+
+def _normalize_router_model(raw: Any, *, fallback: str = DEFAULT_ROUTER_MODEL) -> str:
+    name = str(raw or "").strip()
+    return name or fallback
 
 
 def _slot_from_dict(raw: dict[str, Any], *, fallback: dict[str, Any] | None = None) -> ModelSlot:
@@ -180,13 +191,17 @@ def _slot_from_dict(raw: dict[str, Any], *, fallback: dict[str, Any] | None = No
 
 
 def default_settings() -> AppSettings:
-    return AppSettings(slots=[_slot_from_dict(s) for s in DEFAULT_SLOTS])
+    return AppSettings(
+        slots=[_slot_from_dict(s) for s in DEFAULT_SLOTS],
+        router_model=DEFAULT_ROUTER_MODEL,
+    )
 
 
 def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
     """Builtin-слоты всегда на месте; пользовательские — из файла."""
     defaults_by_id = {s["id"]: s for s in DEFAULT_SLOTS}
-    raw_slots = list((raw or {}).get("slots") or [])
+    raw = raw if isinstance(raw, dict) else {}
+    raw_slots = list(raw.get("slots") or [])
     by_id: dict[str, dict[str, Any]] = {}
     order: list[str] = []
 
@@ -221,7 +236,12 @@ def _merge_with_defaults(raw: dict[str, Any] | None) -> AppSettings:
                 order.append(sid)
 
     slots = [_slot_from_dict(by_id[sid], fallback=defaults_by_id.get(sid)) for sid in order]
-    return AppSettings(slots=slots)
+    tiny_model = next((s.model for s in slots if s.id == "tiny"), DEFAULT_ROUTER_MODEL)
+    router_model = _normalize_router_model(
+        raw.get("router_model"),
+        fallback=tiny_model or DEFAULT_ROUTER_MODEL,
+    )
+    return AppSettings(slots=slots, router_model=router_model)
 
 
 def load_settings(*, path: Path | None = None) -> AppSettings:
@@ -240,7 +260,10 @@ def load_settings(*, path: Path | None = None) -> AppSettings:
 
 
 def deepcopy_settings(src: AppSettings) -> AppSettings:
-    return AppSettings(slots=[_slot_from_dict(s.to_dict()) for s in src.slots])
+    return AppSettings(
+        slots=[_slot_from_dict(s.to_dict()) for s in src.slots],
+        router_model=src.router_model,
+    )
 
 
 def get_settings() -> AppSettings:
@@ -339,8 +362,10 @@ def build_route_schema(settings: AppSettings | None = None) -> dict[str, Any]:
 def public_settings_payload(settings: AppSettings | None = None) -> dict[str, Any]:
     s = settings or get_settings()
     return {
+        "router_model": s.router_model,
         "slots": [slot.to_dict() for slot in s.slots],
         "defaults": {
+            "router_model": DEFAULT_ROUTER_MODEL,
             "slots": DEFAULT_SLOTS,
             "router_prompts": DEFAULT_ROUTER_PROMPTS,
         },
@@ -390,11 +415,30 @@ def add_slot(
     return save_settings(s)
 
 
-def update_slots(slots_payload: list[dict[str, Any]]) -> AppSettings:
-    """Полная замена списка слотов (с сохранением обязательных builtin)."""
+def update_settings(
+    slots_payload: list[dict[str, Any]],
+    *,
+    router_model: str | None = None,
+) -> AppSettings:
+    """Полная замена списка слотов (+ опционально модель роутера)."""
     if not isinstance(slots_payload, list) or not slots_payload:
         raise ValueError("Нужен непустой список slots")
-    return save_settings(AppSettings(slots=[_slot_from_dict(x) for x in slots_payload]))
+    current = get_settings()
+    rm = _normalize_router_model(
+        router_model if router_model is not None else current.router_model,
+        fallback=current.router_model or DEFAULT_ROUTER_MODEL,
+    )
+    return save_settings(
+        AppSettings(
+            slots=[_slot_from_dict(x) for x in slots_payload],
+            router_model=rm,
+        )
+    )
+
+
+# совместимость со старым именем
+def update_slots(slots_payload: list[dict[str, Any]]) -> AppSettings:
+    return update_settings(slots_payload)
 
 
 def delete_slot(slot_id: str) -> AppSettings:
@@ -434,7 +478,7 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
     router.TIER_RANK.update(ranks)
     router.TIER_ORDER[:] = order
     router.ALL_TIERS = frozenset(ranks)
-    router.ROUTE_MODEL = models.get("tiny") or router.ROUTE_MODEL
+    router.ROUTE_MODEL = s.router_model or models.get("tiny") or router.ROUTE_MODEL
     router.REVALIDATE_MODEL = models.get("mid") or router.REVALIDATE_MODEL
     router.SYSTEM = build_router_system(s)
     router.ROUTE_SCHEMA = build_route_schema(s)

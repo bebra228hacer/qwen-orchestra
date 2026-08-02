@@ -8,8 +8,6 @@
     input: $("#input"),
     btnSend: $("#btn-send"),
     btnNew: $("#btn-new"),
-    btnClear: $("#btn-clear"),
-    btnDelete: $("#btn-delete"),
     tierSelect: $("#tier-select"),
     health: $("#health"),
     statusLine: $("#status-line"),
@@ -18,6 +16,9 @@
     modelsList: $("#models-list"),
     modelsStatus: $("#models-status"),
     btnModelsClose: $("#btn-models-close"),
+    btnModelsHelp: $("#btn-models-help"),
+    modelsHelp: $("#models-help"),
+    routerModelSelect: $("#router-model-select"),
     btnModelsSave: $("#btn-models-save"),
     btnModelsAdd: $("#btn-models-add"),
     btnModelsReset: $("#btn-models-reset"),
@@ -36,6 +37,7 @@
     selectGen: 0,
     ollamaModels: [],
     slots: [],
+    routerModel: "",
   };
 
   function forceTier() {
@@ -51,15 +53,198 @@
       .replace(/"/g, "&quot;");
   }
 
+  if (typeof marked !== "undefined") {
+    marked.setOptions({ gfm: true, breaks: true });
+  }
+
+  /** Закрыть незакрытый fence, чтобы стрим не ломал разметку. */
+  function closeOpenFences(text) {
+    const n = (String(text).match(/```/g) || []).length;
+    return n % 2 === 1 ? text + "\n```" : text;
+  }
+
+  function hasOpenFence(text) {
+    return ((String(text).match(/```/g) || []).length % 2) === 1;
+  }
+
+  function renderMarkdown(text, { streaming = false } = {}) {
+    let src = text == null ? "" : String(text);
+    if (streaming) src = closeOpenFences(src);
+    if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+      return escapeHtml(src).replace(/\n/g, "<br>");
+    }
+    const html = marked.parse(src, { async: false });
+    return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+  }
+
+  function langFromCode(codeEl) {
+    const cls = codeEl?.getAttribute?.("class") || codeEl?.className || "";
+    const m = String(cls).match(/(?:^|\s)(?:language|lang)-([^\s]+)/i);
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+
+  function codePlainText(preOrCode) {
+    const code = preOrCode.querySelector?.("code") || preOrCode;
+    const clone = code.cloneNode(true);
+    clone.querySelectorAll(".stream-caret").forEach((n) => n.remove());
+    return clone.textContent || "";
+  }
+
+  const ICON_COPY =
+    '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M5.75 2.5A1.75 1.75 0 0 0 4 4.25v7a.75.75 0 0 1-1.5 0v-7A3.25 3.25 0 0 1 5.75 1h5a.75.75 0 0 1 0 1.5h-5zm1.5 3A1.75 1.75 0 0 0 5.5 7.25v6c0 .966.784 1.75 1.75 1.75h5A1.75 1.75 0 0 0 14 13.25v-6A1.75 1.75 0 0 0 12.25 5.5h-5zm0 1.5h5a.25.25 0 0 1 .25.25v6a.25.25 0 0 1-.25.25h-5a.25.25 0 0 1-.25-.25v-6a.25.25 0 0 1 .25-.25z"/></svg>';
+  const ICON_CHECK =
+    '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M12.53 4.22a.75.75 0 0 1 0 1.06l-5.25 5.25a.75.75 0 0 1-1.06 0L4.22 8.53a.75.75 0 0 1 1.06-1.06L6.75 9l4.72-4.72a.75.75 0 0 1 1.06 0z"/></svg>';
+
+  const LANG_ALIASES = {
+    "c++": "cpp",
+    cplusplus: "cpp",
+    "c#": "csharp",
+    cs: "csharp",
+    "f#": "fsharp",
+    js: "javascript",
+    ts: "typescript",
+    py: "python",
+    rb: "ruby",
+    sh: "bash",
+    shell: "bash",
+    zsh: "bash",
+    yml: "yaml",
+    golang: "go",
+    kt: "kotlin",
+    rs: "rust",
+    text: "plaintext",
+    txt: "plaintext",
+  };
+
+  function normalizeLangClass(code) {
+    const lang = langFromCode(code);
+    if (!lang) return;
+    const mapped = LANG_ALIASES[lang.toLowerCase()] || lang.toLowerCase();
+    const cls = String(code.className || "").replace(/(?:^|\s)(?:language|lang)-[^\s]+/gi, "").trim();
+    code.className = cls;
+    code.classList.add("language-" + mapped);
+  }
+
+  function highlightCodeBlocks(el, { streaming = false, text = "" } = {}) {
+    if (typeof hljs === "undefined") return;
+    const codes = [...el.querySelectorAll(".code-block pre code, pre code")];
+    const skipLast = streaming && hasOpenFence(text);
+    for (let i = 0; i < codes.length; i++) {
+      if (skipLast && i === codes.length - 1) continue;
+      const code = codes[i];
+      normalizeLangClass(code);
+      try {
+        hljs.highlightElement(code);
+      } catch (_) {
+        /* неизвестный язык — оставляем plain */
+      }
+    }
+  }
+
+  function enhanceCodeBlocks(el) {
+    for (const pre of [...el.querySelectorAll("pre")]) {
+      if (pre.parentElement?.classList.contains("code-block")) continue;
+      const code = pre.querySelector("code");
+      const lang = langFromCode(code);
+
+      const wrap = document.createElement("div");
+      wrap.className = "code-block";
+
+      const header = document.createElement("div");
+      header.className = "code-block-header";
+
+      const langEl = document.createElement("span");
+      langEl.className = "code-lang";
+      langEl.textContent = lang || "";
+      if (!lang) langEl.hidden = true;
+
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "code-copy";
+      copyBtn.title = "Копировать";
+      copyBtn.setAttribute("aria-label", "Копировать код");
+      copyBtn.innerHTML = ICON_COPY;
+
+      header.appendChild(langEl);
+      header.appendChild(copyBtn);
+
+      pre.replaceWith(wrap);
+      wrap.appendChild(header);
+      wrap.appendChild(pre);
+    }
+  }
+
+  function placeStreamCaret(el, text) {
+    const caret = document.createElement("span");
+    caret.className = "stream-caret";
+    caret.setAttribute("aria-hidden", "true");
+    caret.textContent = "▍";
+    if (hasOpenFence(text)) {
+      const blocks = el.querySelectorAll(".code-block pre, pre");
+      const hostPre = blocks[blocks.length - 1];
+      const host = hostPre?.querySelector("code") || hostPre;
+      if (host) {
+        host.appendChild(caret);
+        return;
+      }
+    }
+    el.appendChild(caret);
+  }
+
+  function setMsgBody(el, text, { streaming = false } = {}) {
+    const src = text == null ? "" : String(text);
+    el.innerHTML = renderMarkdown(src, { streaming });
+    for (const table of el.querySelectorAll("table")) {
+      if (table.parentElement?.classList.contains("md-table-wrap")) continue;
+      const wrap = document.createElement("div");
+      wrap.className = "md-table-wrap";
+      table.replaceWith(wrap);
+      wrap.appendChild(table);
+    }
+    enhanceCodeBlocks(el);
+    highlightCodeBlocks(el, { streaming, text: src });
+    if (streaming) placeStreamCaret(el, src);
+  }
+
+  async function copyCodeBlock(btn) {
+    const block = btn.closest(".code-block");
+    const pre = block?.querySelector("pre");
+    if (!pre) return;
+    const text = codePlainText(pre);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        ta.remove();
+      }
+    }
+    btn.classList.add("copied");
+    btn.title = "Скопировано";
+    btn.innerHTML = ICON_CHECK;
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(() => {
+      btn.classList.remove("copied");
+      btn.title = "Копировать";
+      btn.innerHTML = ICON_COPY;
+    }, 1500);
+  }
+
   function setBusy(busy) {
     state.busy = busy;
     els.btnSend.disabled = busy || !els.input.value.trim();
     els.input.disabled = busy;
     els.btnNew.disabled = busy;
-    els.btnClear.disabled = busy || !state.activeId;
-    els.btnDelete.disabled = busy || !state.activeId;
     els.tierSelect.disabled = busy;
     if (els.btnModels) els.btnModels.disabled = busy;
+    els.chatList.classList.toggle("busy", busy);
   }
 
   function autosize() {
@@ -168,18 +353,35 @@
 
       const meta = document.createElement("div");
       meta.className = "slot-meta";
+
+      const modelWrap = document.createElement("div");
+      modelWrap.className = "field-with-label";
+      const modelLab = document.createElement("label");
+      modelLab.className = "field-label";
+      modelLab.textContent = "Модель";
       const modelSel = document.createElement("select");
       modelSel.className = "tier-select slot-model";
       fillModelSelect(modelSel, slot.model);
+      modelWrap.appendChild(modelLab);
+      modelWrap.appendChild(modelSel);
+
+      const rankWrap = document.createElement("div");
+      rankWrap.className = "field-with-label rank-field";
+      const rankLab = document.createElement("label");
+      rankLab.className = "field-label";
+      rankLab.textContent = "Rank";
       const rankInp = document.createElement("input");
       rankInp.className = "text-input rank-input slot-rank";
       rankInp.type = "number";
       rankInp.min = "0";
       rankInp.max = "9";
       rankInp.value = String(slot.rank ?? 1);
-      rankInp.title = "rank (сила / эскалация)";
-      meta.appendChild(modelSel);
-      meta.appendChild(rankInp);
+      rankInp.title = "Сила / порядок эскалации";
+      rankWrap.appendChild(rankLab);
+      rankWrap.appendChild(rankInp);
+
+      meta.appendChild(modelWrap);
+      meta.appendChild(rankWrap);
       card.appendChild(meta);
 
       const labelInp = document.createElement("input");
@@ -232,14 +434,24 @@
 
   async function loadSettings() {
     const data = await api("/api/settings");
+    state.routerModel = data.router_model || "";
     renderModelsList(data.slots || []);
     populateTierSelect(data.slots || []);
     fillModelSelect(els.addSlotModel, els.addSlotModel.value || "");
+    fillModelSelect(els.routerModelSelect, state.routerModel);
     return data;
+  }
+
+  function toggleModelsHelp() {
+    const open = els.modelsHelp.hidden;
+    els.modelsHelp.hidden = !open;
+    els.btnModelsHelp.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   async function openModelsModal() {
     setModelsStatus("");
+    els.modelsHelp.hidden = true;
+    els.btnModelsHelp.setAttribute("aria-expanded", "false");
     try {
       await refreshHealth();
       await loadSettings();
@@ -260,10 +472,15 @@
       const slots = collectSlotsFromDom();
       const data = await api("/api/settings", {
         method: "PUT",
-        body: JSON.stringify({ slots }),
+        body: JSON.stringify({
+          slots,
+          router_model: els.routerModelSelect.value || null,
+        }),
       });
+      state.routerModel = data.router_model || "";
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
+      fillModelSelect(els.routerModelSelect, state.routerModel);
       setModelsStatus("Сохранено", "ok");
       await refreshHealth();
     } catch (e) {
@@ -291,8 +508,10 @@
         method: "POST",
         body: JSON.stringify(body),
       });
+      state.routerModel = data.router_model || state.routerModel;
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
+      fillModelSelect(els.routerModelSelect, state.routerModel);
       els.addSlotId.value = "";
       els.addSlotLabel.value = "";
       els.addSlotPrompt.value = "";
@@ -325,8 +544,10 @@
     setModelsStatus("Сброс…");
     try {
       const data = await api("/api/settings/reset", { method: "POST", body: "{}" });
+      state.routerModel = data.router_model || "";
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
+      fillModelSelect(els.routerModelSelect, state.routerModel);
       setModelsStatus("Сброшено к defaults", "ok");
       await refreshHealth();
     } catch (e) {
@@ -372,15 +593,55 @@
     }
   }
 
+  const ICON_CLEAR =
+    '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8.09 2.09a1.75 1.75 0 0 1 2.47 0l3.35 3.35a1.75 1.75 0 0 1 0 2.47L8.4 13.42A2.25 2.25 0 0 1 6.81 14H2.75a.75.75 0 0 1-.75-.75V9.19c0-.6.24-1.17.66-1.59l5.43-5.51zm1.41.88a.25.25 0 0 0-.35 0L4.2 8.1l3.7 3.7 5.05-5.05a.25.25 0 0 0 0-.35L8.5 2.97zM3.5 9.4v3.1h2.9L3.5 9.4z"/></svg>';
+  const ICON_DELETE =
+    '<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M6.5 1.75A.75.75 0 0 1 7.25 1h1.5a.75.75 0 0 1 .75.75V3h3.75a.75.75 0 0 1 0 1.5h-.34l-.7 8.05A1.75 1.75 0 0 1 10.47 14H5.53a1.75 1.75 0 0 1-1.74-1.45L3.09 4.5H2.75a.75.75 0 0 1 0-1.5H6.5V1.75zM5.1 4.5l.68 7.85a.25.25 0 0 0 .25.2h4.94a.25.25 0 0 0 .25-.2l.68-7.85H5.1zm1.65 1.75a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5a.75.75 0 0 1 .75-.75zm2.5 0a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5a.75.75 0 0 1 .75-.75z"/></svg>';
+
   function renderChatList() {
     els.chatList.innerHTML = "";
     for (const c of state.chats) {
+      const row = document.createElement("div");
+      row.className = "chat-row" + (c.id === state.activeId ? " active" : "");
+      row.dataset.id = c.id;
+
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "chat-item" + (c.id === state.activeId ? " active" : "");
+      btn.className = "chat-item";
       btn.textContent = c.title || "New Chat";
+      btn.title = c.title || "New Chat";
       btn.addEventListener("click", () => selectChat(c.id));
-      els.chatList.appendChild(btn);
+
+      const actions = document.createElement("div");
+      actions.className = "chat-actions";
+
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "chat-action";
+      clearBtn.title = "Очистить";
+      clearBtn.setAttribute("aria-label", "Очистить чат");
+      clearBtn.innerHTML = ICON_CLEAR;
+      clearBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        clearChat(c.id);
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "chat-action danger";
+      delBtn.title = "Удалить";
+      delBtn.setAttribute("aria-label", "Удалить чат");
+      delBtn.innerHTML = ICON_DELETE;
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        deleteChat(c.id);
+      });
+
+      actions.appendChild(clearBtn);
+      actions.appendChild(delBtn);
+      row.appendChild(btn);
+      row.appendChild(actions);
+      els.chatList.appendChild(row);
     }
   }
 
@@ -413,7 +674,7 @@
       <div class="msg-tools"></div>
       <div class="msg-meta-slot"></div>
     `;
-    wrap.querySelector(".msg-body").textContent = content || "";
+    setMsgBody(wrap.querySelector(".msg-body"), content || "");
     wrap.querySelector(".msg-meta-slot").innerHTML = metaChips(meta);
     els.messages.appendChild(wrap);
     els.messages.scrollTop = els.messages.scrollHeight;
@@ -470,26 +731,31 @@
     }
   }
 
-  async function clearChat() {
-    if (!state.activeId || state.busy) return;
-    await api(`/api/chats/${state.activeId}/clear`, { method: "POST", body: "{}" });
-    els.messages.innerHTML = "";
-    els.chatTitle.textContent = "New Chat";
+  async function clearChat(id) {
+    id = id || state.activeId;
+    if (!id || state.busy) return;
+    await api(`/api/chats/${id}/clear`, { method: "POST", body: "{}" });
+    if (id === state.activeId) {
+      els.messages.innerHTML = "";
+      els.chatTitle.textContent = "New Chat";
+    }
     await loadChats();
   }
 
-  async function deleteChat() {
-    if (!state.activeId || state.busy) return;
-    const id = state.activeId;
+  async function deleteChat(id) {
+    id = id || state.activeId;
+    if (!id || state.busy) return;
+    const wasActive = id === state.activeId;
     await api(`/api/chats/${id}`, { method: "DELETE" });
-    state.activeId = null;
-    els.messages.innerHTML = "";
-    els.chatTitle.textContent = "New Chat";
+    if (wasActive) {
+      state.activeId = null;
+      els.messages.innerHTML = "";
+      els.chatTitle.textContent = "New Chat";
+    }
     await loadChats();
-    if (state.chats.length) {
-      await selectChat(state.chats[0].id);
-    } else {
-      renderChatList();
+    if (wasActive) {
+      if (state.chats.length) await selectChat(state.chats[0].id);
+      else renderChatList();
     }
   }
 
@@ -517,12 +783,30 @@
     return { events, rest };
   }
 
+  function flushBodyRender(ctx, { streaming = false } = {}) {
+    if (ctx._raf) {
+      cancelAnimationFrame(ctx._raf);
+      ctx._raf = 0;
+    }
+    setMsgBody(ctx.bodyEl, ctx.full, { streaming });
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+
+  function scheduleBodyRender(ctx) {
+    if (ctx._raf) return;
+    ctx._raf = requestAnimationFrame(() => {
+      ctx._raf = 0;
+      setMsgBody(ctx.bodyEl, ctx.full, { streaming: true });
+      els.messages.scrollTop = els.messages.scrollHeight;
+    });
+  }
+
   function applySseEvent(event, data, ctx) {
-    const { bodyEl, toolsEl, metaSlot } = ctx;
+    const { toolsEl, metaSlot } = ctx;
     if (event === "meta") {
       if (data.phase === "retry" || data.phase === "restore") {
         ctx.full = "";
-        bodyEl.textContent = "";
+        flushBodyRender(ctx, { streaming: true });
       }
       if (data.phase === "retry" && data.problems && data.problems.length) {
         const line = document.createElement("div");
@@ -566,8 +850,7 @@
       }
     } else if (event === "token") {
       ctx.full += data.text || "";
-      bodyEl.textContent = ctx.full;
-      els.messages.scrollTop = els.messages.scrollHeight;
+      scheduleBodyRender(ctx);
     } else if (event === "tool") {
       const line = document.createElement("div");
       line.className = "tool-line";
@@ -593,8 +876,8 @@
       };
       if (data.text) {
         ctx.full = data.text;
-        bodyEl.textContent = ctx.full;
       }
+      flushBodyRender(ctx, { streaming: false });
       metaSlot.innerHTML = metaChips(ctx.liveMeta);
       els.statusLine.textContent = [
         data.tier,
@@ -673,13 +956,19 @@
       }
 
       asst.classList.remove("streaming");
+      flushBodyRender(ctx, { streaming: false });
       await loadChats();
       const active = state.chats.find((c) => c.id === chatId);
       if (active) els.chatTitle.textContent = active.title;
     } catch (e) {
       asst.classList.remove("streaming");
-      if (!bodyEl.textContent) bodyEl.textContent = "Ошибка: " + e.message;
-      else bodyEl.textContent += "\n\nОшибка: " + e.message;
+      if (ctx._raf) {
+        cancelAnimationFrame(ctx._raf);
+        ctx._raf = 0;
+      }
+      const errLine = "Ошибка: " + e.message;
+      ctx.full = ctx.full ? ctx.full + "\n\n" + errLine : errLine;
+      flushBodyRender(ctx, { streaming: false });
       els.statusLine.textContent = "Ошибка";
       metaSlot.innerHTML = `<div class="msg-meta"><span class="chip warn">error</span></div>`;
     } finally {
@@ -702,13 +991,18 @@
 
   els.btnSend.addEventListener("click", send);
   els.btnNew.addEventListener("click", newChat);
-  els.btnClear.addEventListener("click", clearChat);
-  els.btnDelete.addEventListener("click", deleteChat);
   els.btnModels.addEventListener("click", openModelsModal);
   els.btnModelsClose.addEventListener("click", closeModelsModal);
+  els.btnModelsHelp.addEventListener("click", toggleModelsHelp);
   els.btnModelsSave.addEventListener("click", saveModels);
   els.btnModelsAdd.addEventListener("click", addModelSlot);
   els.btnModelsReset.addEventListener("click", resetModels);
+  els.messages.addEventListener("click", (e) => {
+    const btn = e.target.closest(".code-copy");
+    if (!btn || !els.messages.contains(btn)) return;
+    e.preventDefault();
+    copyCodeBlock(btn);
+  });
   els.modelsModal.addEventListener("click", (e) => {
     if (e.target === els.modelsModal) closeModelsModal();
   });
