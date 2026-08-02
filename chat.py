@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import urllib.error
 
-from llm import chat_stream
+from qwen_orchestra.llm import chat_stream
 
 MODEL = "qwen3.5:4b"
 

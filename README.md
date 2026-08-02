@@ -12,7 +12,7 @@
 
 Большинство mid/heavy/web/coder запросов роутятся **без** вызова tiny (детерминированные правила). Ручной тир в UI тоже не дергает роутер. Эскалация не падает на неустановленный 14b. У Qwen3.5 thinking **выключен** (`think: false`) — иначе ломаются JSON-роутер и tools.
 
-Слоты моделей и **промпты роутера** («когда какую модель выбирать») настраиваются в UI: кнопка **«Модели и промпты»** в сайдбаре (справка по **?**). Можно выбрать **модель роутера**, сменить Ollama-имя у слотов, отредактировать тексты для Auto и **добавить свою нейронку**. Defaults и файл `settings.json` — модуль `settings.py`.
+Слоты моделей и **промпты роутера** («когда какую модель выбирать») настраиваются в UI: кнопка **«Модели и промпты»** в сайдбаре (справка по **?**). Можно выбрать **модель роутера**, сменить Ollama-имя у слотов, отредактировать тексты для Auto и **добавить свою нейронку** (Ollama или **OpenRouter**). Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json`. Defaults и файл `settings.json` — модуль `settings.py`.
 
 Поток одного запроса:
 
@@ -33,13 +33,30 @@ user → route → plan context (история + num_ctx) → worker (± web)
 - [Ollama](https://ollama.com/download) (лаунчер сам поднимет `ollama serve`, если сервис не запущен)
 - Для 14b желательно ≥8 ГБ VRAM (на 8 ГБ возможен CPU/GPU hybrid и ниже скорость)
 
-### Python (бэкенд)
+### Python (бэкенд / SDK)
 
 ```powershell
-python -m pip install -r requirements.txt
+python -m pip install -e ".[web]"
+# или только ядро оркестра без веб-сервера:
+# python -m pip install -e .
 ```
 
-Пакеты: `fastapi`, `uvicorn`, `pydantic`, `ddgs` (и транзитивные зависимости из `requirements.txt`).
+Пакет `qwen-orchestra`: ядро — `ddgs`, `psutil`; extra `[web]` — `fastapi`, `uvicorn`, `pydantic`.
+Альтернатива: `pip install -r requirements.txt` (всё сразу, как раньше).
+
+### SDK для других приложений
+
+```python
+from qwen_orchestra import Client
+
+client = Client()  # ollama_host=..., settings_path=...
+print(client.health())
+print(client.route("напиши функцию сортировки"))
+result = client.ask("2+2")
+print(result.text, result.tier, result.model)
+```
+
+Пример: `examples/ask_sdk.py`.
 
 ### Фронтенд-библиотеки (уже в репозитории)
 
@@ -69,7 +86,8 @@ cd qwen-orchestra
 ### 2. Установить зависимости Python
 
 ```powershell
-python -m pip install -r requirements.txt
+python -m pip install -e ".[web]"
+# или: python -m pip install -r requirements.txt
 ```
 
 ### 3. Скачать модели Ollama
@@ -175,14 +193,13 @@ num_ctx = ceil_256(tokens(промпт) + 128 + reserve_ответа + safety) �
 
 | Путь | Назначение |
 |------|------------|
-| `orchestra.py` | Ядро: route → context → worker → selfcheck → retry |
-| `router.py` | Выбор tier + валидация |
-| `selfcheck.py` | Самопроверка ответа |
-| `llm.py` | Клиент Ollama (`num_ctx` в options) |
-| `metrics.py` | Метрики CPU/RAM/GPU/температуры + Ollama `/api/ps` |
+| `qwen_orchestra/` | **Python SDK**: `Client`, orchestra, router, selfcheck, llm, settings, metrics |
+| `qwen_orchestra/client.py` | Публичный фасад для встраивания в другие приложения |
+| `orchestra.py` и др. | Shim-модули (совместимость со старыми импортами) |
 | `server.py` | FastAPI + SSE + `/api/metrics`, порт `8787` |
 | `web/` | Тёмный Cursor-like UI (чат + правая панель монитора) |
 | `open_web.py` | Лаунчер: Ollama (если нужно) + сервер + браузер |
+| `examples/ask_sdk.py` | Минимальный пример SDK |
 | `AGENTS.md` | Карта для AI-агентов |
 
 ---

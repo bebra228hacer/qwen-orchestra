@@ -1,5 +1,8 @@
+# Core SDK (также: pip install -e .)
 ddgs>=9.0.0,<10
+psutil>=6.0.0,<8
+
+# Web app (также: pip install -e ".[web]")
 fastapi>=0.115.0,<1
 uvicorn>=0.32.0,<1
 pydantic>=2.0.0,<3
-psutil>=6.0.0,<8

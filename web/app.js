@@ -24,11 +24,16 @@
     btnModelsAdd: $("#btn-models-add"),
     btnModelsReset: $("#btn-models-reset"),
     addSlotModel: $("#add-slot-model"),
+    addSlotModelOr: $("#add-slot-model-or"),
     addSlotId: $("#add-slot-id"),
     addSlotRank: $("#add-slot-rank"),
     addSlotLabel: $("#add-slot-label"),
     addSlotPrompt: $("#add-slot-prompt"),
     addSlotAuto: $("#add-slot-auto"),
+    orApiKey: $("#or-api-key"),
+    orKeyStatus: $("#or-key-status"),
+    btnOrKeySave: $("#btn-or-key-save"),
+    btnOrKeyClear: $("#btn-or-key-clear"),
     monitorPanel: $("#monitor-panel"),
     panelResizer: $("#panel-resizer"),
     btnPanelToggle: $("#btn-panel-toggle"),
@@ -421,6 +426,79 @@
     }
   }
 
+  function selectedAddProvider() {
+    const el = document.querySelector('input[name="add-provider"]:checked');
+    return el ? el.value : "ollama";
+  }
+
+  function syncAddProviderUi() {
+    const prov = selectedAddProvider();
+    const isOr = prov === "openrouter";
+    els.addSlotModel.hidden = isOr;
+    els.addSlotModelOr.hidden = !isOr;
+    if (isOr && Number(els.addSlotRank.value) === 2) {
+      els.addSlotRank.value = "4";
+    }
+    if (!isOr && Number(els.addSlotRank.value) === 4) {
+      els.addSlotRank.value = "2";
+    }
+  }
+
+  function renderOpenRouterStatus(providers) {
+    const or = (providers && providers.openrouter) || {};
+    const st = els.orKeyStatus;
+    if (!st) return;
+    if (or.configured) {
+      st.className = "or-key-status ok";
+      if (or.from_env) {
+        st.textContent = "ключ задан (переменная окружения OPENROUTER_API_KEY)";
+      } else {
+        st.textContent = "ключ задан (secrets.json)";
+      }
+    } else {
+      st.className = "or-key-status";
+      st.textContent = "не задан — слоты OpenRouter недоступны";
+    }
+  }
+
+  async function saveOpenRouterKey() {
+    const key = (els.orApiKey.value || "").trim();
+    if (!key) {
+      setModelsStatus("Введите ключ OpenRouter", "err");
+      return;
+    }
+    setModelsStatus("Сохранение ключа…");
+    try {
+      const data = await api("/api/settings/providers/openrouter", {
+        method: "PUT",
+        body: JSON.stringify({ api_key: key }),
+      });
+      els.orApiKey.value = "";
+      renderOpenRouterStatus(data.providers);
+      setModelsStatus("Ключ OpenRouter сохранён", "ok");
+      await refreshHealth();
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
+  async function clearOpenRouterKey() {
+    if (!confirm("Очистить ключ OpenRouter из secrets.json? (env не трогаем)")) return;
+    setModelsStatus("Очистка ключа…");
+    try {
+      const data = await api("/api/settings/providers/openrouter", {
+        method: "PUT",
+        body: JSON.stringify({ clear: true }),
+      });
+      els.orApiKey.value = "";
+      renderOpenRouterStatus(data.providers);
+      setModelsStatus("Ключ очищен", "ok");
+      await refreshHealth();
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
   function setModelsStatus(text, kind) {
     els.modelsStatus.textContent = text || "";
     els.modelsStatus.className = "modal-status" + (kind ? " " + kind : "");
@@ -433,13 +511,24 @@
       const card = document.createElement("div");
       card.className = "slot-card";
       card.dataset.id = slot.id;
+      card.dataset.provider = slot.provider || "ollama";
 
       const head = document.createElement("div");
       head.className = "slot-card-head";
+      const idWrap = document.createElement("div");
+      idWrap.style.display = "flex";
+      idWrap.style.alignItems = "center";
       const idEl = document.createElement("span");
       idEl.className = "slot-id";
       idEl.textContent = slot.id + (slot.builtin ? " · builtin" : "");
-      head.appendChild(idEl);
+      idWrap.appendChild(idEl);
+      if ((slot.provider || "ollama") === "openrouter") {
+        const badge = document.createElement("span");
+        badge.className = "slot-provider-badge or";
+        badge.textContent = "OpenRouter";
+        idWrap.appendChild(badge);
+      }
+      head.appendChild(idWrap);
       if (!slot.builtin && !slot.required) {
         const del = document.createElement("button");
         del.type = "button";
@@ -457,12 +546,22 @@
       modelWrap.className = "field-with-label";
       const modelLab = document.createElement("label");
       modelLab.className = "field-label";
-      modelLab.textContent = "Модель";
-      const modelSel = document.createElement("select");
-      modelSel.className = "tier-select slot-model";
-      fillModelSelect(modelSel, slot.model);
+      modelLab.textContent =
+        (slot.provider || "ollama") === "openrouter" ? "Модель OpenRouter" : "Модель";
+      let modelCtrl;
+      if ((slot.provider || "ollama") === "openrouter") {
+        modelCtrl = document.createElement("input");
+        modelCtrl.className = "text-input slot-model";
+        modelCtrl.type = "text";
+        modelCtrl.value = slot.model || "";
+        modelCtrl.placeholder = "provider/model-id";
+      } else {
+        modelCtrl = document.createElement("select");
+        modelCtrl.className = "tier-select slot-model";
+        fillModelSelect(modelCtrl, slot.model);
+      }
       modelWrap.appendChild(modelLab);
-      modelWrap.appendChild(modelSel);
+      modelWrap.appendChild(modelCtrl);
 
       const rankWrap = document.createElement("div");
       rankWrap.className = "field-with-label rank-field";
@@ -516,9 +615,10 @@
     for (const card of els.modelsList.querySelectorAll(".slot-card")) {
       const id = card.dataset.id;
       const prev = state.slots.find((s) => s.id === id) || {};
+      const modelEl = card.querySelector(".slot-model");
       out.push({
         id,
-        model: card.querySelector(".slot-model").value,
+        model: (modelEl && modelEl.value) || "",
         label: card.querySelector(".slot-label").value.trim(),
         router_prompt: card.querySelector(".slot-prompt").value.trim(),
         rank: Number(card.querySelector(".slot-rank").value) || 0,
@@ -526,6 +626,7 @@
         required: !!prev.required,
         optional: prev.optional !== false,
         builtin: !!prev.builtin,
+        provider: card.dataset.provider || prev.provider || "ollama",
       });
     }
     return out;
@@ -538,6 +639,8 @@
     populateTierSelect(data.slots || []);
     fillModelSelect(els.addSlotModel, els.addSlotModel.value || "");
     fillModelSelect(els.routerModelSelect, state.routerModel);
+    renderOpenRouterStatus(data.providers);
+    syncAddProviderUi();
     return data;
   }
 
@@ -600,9 +703,18 @@
   }
 
   async function addModelSlot() {
-    const model = els.addSlotModel.value.trim();
+    const provider = selectedAddProvider();
+    const model =
+      provider === "openrouter"
+        ? els.addSlotModelOr.value.trim()
+        : els.addSlotModel.value.trim();
     if (!model) {
-      setModelsStatus("Выберите модель Ollama", "err");
+      setModelsStatus(
+        provider === "openrouter"
+          ? "Укажите id модели OpenRouter"
+          : "Выберите модель Ollama",
+        "err"
+      );
       return;
     }
     setModelsStatus("Добавление…");
@@ -610,12 +722,15 @@
       await persistDraftSlots();
       const body = {
         model,
+        provider,
         label: els.addSlotLabel.value.trim() || null,
         router_prompt: els.addSlotPrompt.value.trim() || null,
         id: els.addSlotId.value.trim() || null,
         rank: Number.isFinite(Number(els.addSlotRank.value))
           ? Number(els.addSlotRank.value)
-          : 2,
+          : provider === "openrouter"
+            ? 4
+            : 2,
         router_auto: els.addSlotAuto.checked,
       };
       const data = await api("/api/settings/slots", {
@@ -626,10 +741,12 @@
       renderModelsList(data.slots || []);
       populateTierSelect(data.slots || []);
       fillModelSelect(els.routerModelSelect, state.routerModel);
+      renderOpenRouterStatus(data.providers);
       els.addSlotId.value = "";
       els.addSlotLabel.value = "";
       els.addSlotPrompt.value = "";
-      els.addSlotRank.value = "2";
+      els.addSlotModelOr.value = "";
+      els.addSlotRank.value = provider === "openrouter" ? "4" : "2";
       els.addSlotAuto.checked = true;
       setModelsStatus("Добавлено", "ok");
       await refreshHealth();
@@ -1141,6 +1258,11 @@
   els.btnModelsSave.addEventListener("click", saveModels);
   els.btnModelsAdd.addEventListener("click", addModelSlot);
   els.btnModelsReset.addEventListener("click", resetModels);
+  if (els.btnOrKeySave) els.btnOrKeySave.addEventListener("click", saveOpenRouterKey);
+  if (els.btnOrKeyClear) els.btnOrKeyClear.addEventListener("click", clearOpenRouterKey);
+  document.querySelectorAll('input[name="add-provider"]').forEach((el) => {
+    el.addEventListener("change", syncAddProviderUi);
+  });
   els.messages.addEventListener("click", (e) => {
     const btn = e.target.closest(".code-copy");
     if (!btn || !els.messages.contains(btn)) return;

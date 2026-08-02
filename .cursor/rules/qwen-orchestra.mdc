@@ -9,18 +9,20 @@ alwaysApply: true
 
 ## Стек
 
-- Ядро: `orchestra.handle` ← `router.py` + `selfcheck.py` + `llm.py` + `tools_web.py` + `settings.py`
+- SDK: `qwen_orchestra.Client` → `orchestra.handle` ← `router` + `selfcheck` + `llm` + `tools_web` + `settings`
 - Цикл: `route → plan_worker_context → worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/` (чат + правая панель монитора)
-- Метрики: `metrics.py` → `GET /api/metrics` (psutil, nvidia-smi + температуры, Ollama `/api/ps`)
+- Метрики: `qwen_orchestra.metrics` → `GET /api/metrics` (psutil, nvidia-smi + температуры, Ollama `/api/ps`)
 - UI Markdown/код/формулы: vendored `web/vendor/` — marked, DOMPurify, highlight.js, KaTeX (без npm/CDN)
 - Лаунчер: `open_web.py` / `QwenChat.exe` (при необходимости `ollama serve`, ждёт `/api/ready`, открывает браузер; свою Ollama гасит при выходе)
+- Установка: `pip install -e ".[web]"`; публичный вход для приложений — `from qwen_orchestra import Client`
 
 ## Тиры
 
 Defaults: `tiny=qwen3.5:0.8b` · `mid=qwen3.5:4b` · `heavy=qwen3.5:9b` · `xlarge=qwen2.5:14b` · `coder=qwen2.5-coder:14b`
 
-Слоты и промпты роутера («когда использовать») — `settings.py` / `settings.json`, UI «Модели и промпты».
+Слоты и промпты роутера («когда использовать») — `qwen_orchestra/settings.py` / `settings.json`, UI «Модели и промпты».
+Кастомный слот может быть `provider: openrouter` (ключ — env / `secrets.json`); worker без tools на OR.
 Эскалация по `rank`; тяжёлый код стартует на `coder`. Optional-тиры для health пропускаются, если не установлены.
 Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код.
 Тексты для LLM-роутера — editable per-slot `router_prompt` (не путать с `tier_floor`).
@@ -39,6 +41,7 @@ Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_ur
 - Размер окна / история — только в `plan_worker_context` (+ хелперы рядом)
 - Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`)
 - Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE
+- Публичный API для приложений — `qwen_orchestra.Client` (не плодить обходные импорты ядра без нужды)
 - Не слушать `0.0.0.0`; не добавлять light-theme / auth / code-editor без запроса
 - `start.bat` — CP866 без BOM + `cd /d "%~dp0"`
 - После правок лаунчера пересобрать `QwenChat.exe` (см. AGENTS.md)

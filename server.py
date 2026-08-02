@@ -17,10 +17,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from llm import installed_models
-from metrics import collect as collect_metrics
-from orchestra import MODELS, handle, missing_models, missing_optional_models
-import settings as app_settings
+from qwen_orchestra.llm import installed_models
+from qwen_orchestra.metrics import collect as collect_metrics
+from qwen_orchestra.orchestra import MODELS, handle, missing_models, missing_optional_models
+from qwen_orchestra import settings as app_settings
+
+app_settings.ensure_bootstrapped()
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
@@ -76,6 +78,12 @@ class AddSlotBody(BaseModel):
     id: str | None = None
     rank: int = 2
     router_auto: bool = True
+    provider: str = "ollama"
+
+
+class OpenRouterKeyBody(BaseModel):
+    api_key: str | None = None
+    clear: bool = False
 
 
 _chats: dict[str, ChatSession] = {}
@@ -178,6 +186,7 @@ def health() -> dict[str, Any]:
             )
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
+    or_status = app_settings.openrouter_status()
     return {
         "ok": ollama_ok and not missing,
         "ollama": ollama_ok,
@@ -188,6 +197,7 @@ def health() -> dict[str, Any]:
         "router_missing": router_missing,
         "tiers": MODELS,
         "slots": [s.to_dict() for s in app_settings.get_settings().slots],
+        "providers": {"openrouter": or_status},
         "error": error,
     }
 
@@ -228,10 +238,24 @@ def add_settings_slot(body: AddSlotBody) -> dict[str, Any]:
             slot_id=body.id,
             rank=body.rank,
             router_auto=body.router_auto,
+            provider=body.provider,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return app_settings.public_settings_payload(saved)
+
+
+@app.put("/api/settings/providers/openrouter")
+def put_openrouter_key(body: OpenRouterKeyBody) -> dict[str, Any]:
+    """Сохранить или очистить OpenRouter API key (secrets.json)."""
+    if body.clear or not (body.api_key or "").strip():
+        if body.clear or body.api_key is not None:
+            app_settings.set_openrouter_api_key(None)
+        else:
+            raise HTTPException(status_code=400, detail="Укажите api_key или clear=true")
+    else:
+        app_settings.set_openrouter_api_key(body.api_key)
+    return app_settings.public_settings_payload()
 
 
 @app.delete("/api/settings/slots/{slot_id}")

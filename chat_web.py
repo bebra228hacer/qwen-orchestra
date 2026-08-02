@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import urllib.error
 
-from llm import chat
-from orchestra import MAX_TOOL_CALLS, MAX_TOOL_ROUNDS, _fallback_tools, _run_tool
-from tools_web import TOOLS
+from qwen_orchestra.llm import chat
+from qwen_orchestra.orchestra import MAX_TOOL_CALLS, MAX_TOOL_ROUNDS, _fallback_tools, _run_tool
+from qwen_orchestra.tools_web import TOOLS
 
 MODEL = "qwen3.5:4b"
 

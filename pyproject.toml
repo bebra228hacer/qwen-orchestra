@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen-orchestra"
+version = "0.1.0"
+description = "Local Qwen orchestra over Ollama: routing, selfcheck, web tools"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Qwen Orchestra" }]
+dependencies = [
+    "ddgs>=9.0.0,<10",
+    "psutil>=6.0.0,<8",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.115.0,<1",
+    "uvicorn>=0.32.0,<1",
+    "pydantic>=2.0.0,<3",
+]
+
+[project.urls]
+Homepage = "https://github.com/bebra228hacer/qwen-orchestra"
+
+[tool.setuptools.packages.find]
+include = ["qwen_orchestra*"]

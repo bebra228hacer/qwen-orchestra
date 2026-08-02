@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from orchestra import handle, missing_models
+from qwen_orchestra.orchestra import handle, missing_models
 
 
 def main() -> None:

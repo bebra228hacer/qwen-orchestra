@@ -1012,11 +1012,69 @@ input {
   color: var(--accent);
 }
 
+.slot-provider-badge {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 8px;
+}
+
+.slot-provider-badge.or {
+  color: #9ecbff;
+  border-color: #3a5a7a;
+}
+
 .slot-meta {
   display: grid;
   grid-template-columns: 1fr 88px;
   gap: 8px;
   align-items: end;
+}
+
+.or-key-row {
+  padding: 0 16px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.or-key-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 2px 0 6px;
+}
+
+.or-key-status.ok {
+  color: #8bc49a;
+}
+
+.or-key-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.or-key-inputs .text-input {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
+
+.provider-toggle {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.provider-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
 }
 
 .add-slot-form {

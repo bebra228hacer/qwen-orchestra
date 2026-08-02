@@ -13,14 +13,16 @@
 1. Сервис **Ollama** запущен (`http://localhost:11434`).
 2. Модели: `qwen3.5:0.8b`, `qwen3.5:4b`, `qwen3.5:9b` (`ollama pull …`).
 3. Опционально: `qwen2.5:14b`, `qwen2.5-coder:14b` (тиры `xlarge` / `coder`, Q4_K_M ~9 ГБ).
-4. Python deps: `pip install -r requirements.txt` (`ddgs`, `fastapi`, `uvicorn`, `pydantic`, `psutil`).
-5. Фронтенд (vendored, без npm): см. `web/vendor/` —
+4. Опционально: OpenRouter API key (`OPENROUTER_API_KEY` или UI → secrets.json) для внешних слотов.
+5. Python: `pip install -e ".[web]"` или `pip install -r requirements.txt` (`ddgs`, `psutil`; для веба — `fastapi`, `uvicorn`, `pydantic`).
+6. Публичный SDK: `from qwen_orchestra import Client` (in-process; см. `examples/ask_sdk.py`).
+7. Фронтенд (vendored, без npm): см. `web/vendor/` —
    - `marked.min.js` — Markdown (GFM);
    - `purify.min.js` — DOMPurify, санитизация HTML;
    - `highlight.min.js` + `highlight-github-dark.min.css` — подсветка кода;
    - `katex/` — KaTeX + auto-render + fonts (формулы `$…$` / `$$…$$`).
    Подключение в `web/index.html`; CDN не нужен (офлайн-чат).
-6. Для GPU-метрик и температур в правой панели — NVIDIA + `nvidia-smi` в PATH (иначе секции GPU/температур пустые). Температура цепей памяти часто N/A на GDDR.
+8. Для GPU-метрик и температур в правой панели — NVIDIA + `nvidia-smi` в PATH (иначе секции GPU/температур пустые). Температура цепей памяти часто N/A на GDDR.
 
 На GPU ~8 ГБ VRAM 14b часто идёт как hybrid CPU/GPU — скорость ниже, чем у 9b на 100% GPU.
 
@@ -28,13 +30,16 @@
 
 | Файл / папка | Роль |
 |---|---|
-| `orchestra.py` | Ядро: `handle()`, `plan_worker_context()`, цикл попыток, tools, колбэки |
-| `settings.py` | Слоты моделей + промпты роутера (`settings.json`); defaults и apply в runtime |
-| `router.py` | Роутер на tiny + `tier_floor` / `tier_ceiling`; SYSTEM из settings |
-| `selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на mid (4b) |
-| `llm.py` | Клиент Ollama: `chat`, `chat_stream`, `installed_models` (+ `think: false` для Qwen3.5) |
-| `metrics.py` | CPU/RAM (`psutil`), GPU/VRAM/температуры (`nvidia-smi`), Ollama `/api/ps` для панели монитора |
-| `tools_web.py` | `web_search`, `fetch_url` |
+| `qwen_orchestra/` | Устанавливаемый пакет (`pip install -e .`): ядро оркестра |
+| `qwen_orchestra/client.py` | Публичный `Client`: ask / route / health / settings |
+| `qwen_orchestra/orchestra.py` | `handle()`, `plan_worker_context()`, цикл попыток, tools, колбэки |
+| `qwen_orchestra/settings.py` | Слоты + промпты (`settings.json`); OpenRouter key (`secrets.json` / env); lazy bootstrap |
+| `qwen_orchestra/router.py` | Роутер + `tier_floor` / `tier_ceiling`; SYSTEM из settings |
+| `qwen_orchestra/selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на mid (4b) |
+| `qwen_orchestra/llm.py` | Клиент Ollama + OpenRouter (`provider`, `think: false` для Qwen3.5) |
+| `qwen_orchestra/metrics.py` | CPU/RAM/GPU/температуры + Ollama `/api/ps` |
+| `qwen_orchestra/tools_web.py` | `web_search`, `fetch_url` |
+| `orchestra.py` / `router.py` / … | Shim-модули для старых импортов |
 | `orchestra_chat.py` | CLI оркестра |
 | `ask_orchestra.py` | Один вопрос через оркестр |
 | `chat.py` / `ask_once.py` | Только mid (4b), без оркестра |
@@ -43,9 +48,37 @@
 | `web/` | UI: `index.html`, `styles.css`, `app.js` (чат + правая панель монитора) |
 | `web/vendor/` | Фронт-библиотеки: marked, DOMPurify, highlight.js, KaTeX (+ тема/шрифты) |
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
+| `examples/ask_sdk.py` | Пример встраивания `Client` |
 | `QwenChat.exe` / `QwenChat.bat` | Сборка/обёртка лаунчера |
 | `start.bat` | Меню режимов (CP866, `cd /d "%~dp0"`) |
 | `CODE_AUDIT.md` | Статический аудит: баги / избыточность / оптимизации; не перепроверять заново без нужды |
+
+## SDK (`qwen_orchestra.Client`)
+
+Публичный вход для других Python-приложений (in-process, без HTTP):
+
+```python
+from qwen_orchestra import Client
+client = Client()                      # или ollama_host=..., settings_path=...
+client.ready() / client.health()
+client.route(text)                     # RouteDecision
+client.ask(text, history=..., on_token=...)  # OrchestraResult, verbose=False
+client.get_settings() / update_settings(...) / add_slot(...) / delete_slot(...)
+client.set_openrouter_api_key(...)  # secrets.json; None — очистить
+```
+
+`settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
+Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом (не в git).
+Bootstrap ленивый (`ensure_bootstrapped` / `Client.__init__`), не при голом импорте модулей.
+
+### OpenRouter-слоты
+
+- В UI «Модели и промпты»: провайдер OpenRouter + id модели (`anthropic/claude-sonnet-4`) + rank/prompt.
+- Поле слота `provider`: `ollama` (default) | `openrouter`. Builtin всегда ollama.
+- Worker ходит в OpenRouter chat/completions (stream); **tools пока только на Ollama**.
+- Роутер и selfcheck остаются локальными (tiny/mid).
+- Availability: ключ задан → слот доступен; иначе как optional missing (`openrouter:…`).
+- API: `PUT /api/settings/providers/openrouter` `{ "api_key": "…" }` / `{ "clear": true }`.
 
 ## Оркестр — как работает
 
@@ -55,11 +88,11 @@ user → route → plan context → worker (± web tools) → selfcheck
                  └──── retry на тир выше ───────────────┘  (до MAX_ATTEMPTS)
 ```
 
-- Тиры: `MODELS` из `settings.py` (builtin `tiny`/`mid`/`heavy`/`xlarge`/`coder` + пользовательские слоты).
-- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); optional — `OPTIONAL_TIERS`.
+- Тиры: `MODELS` из `settings.py` (builtin `tiny`/`mid`/`heavy`/`xlarge`/`coder` + пользовательские слоты; у слота может быть `provider=openrouter`).
+- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); optional — `OPTIONAL_TIERS` (+ OR без ключа).
 - Промпты роутера («когда использовать») — per-slot `router_prompt`; собираются в `router.SYSTEM`.
 - Эскалация: по `rank` слотов; `coder` → xlarge при retry.
-- UI: «Модели и промпты» — remap Ollama-имён, правка промптов, кнопка «Добавить нейронку».
+- UI: «Модели и промпты» — remap Ollama-имён, OpenRouter-слоты + ключ, правка промптов, кнопка «Добавить нейронку».
 - Публичный вход: `orchestra.handle(user_text, history, force_tier=…, stream=…, verbose=…, on_token=…, on_status=…)`.
 - История в `handle` **без** текущего user-сообщения (сервер так и передаёт; CLI тоже; если хвост дублирует вопрос — он снимается).
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
@@ -175,8 +208,9 @@ Web-tool результаты **кэшируются** между retry (пов�
 | GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `slots` |
 | GET | `/api/metrics` | CPU / RAM / GPU / температуры / загруженные модели Ollama (`/api/ps`) |
 | GET/PUT | `/api/settings` | Слоты моделей + `router_model` + промпты роутера (`settings.json`) |
+| PUT | `/api/settings/providers/openrouter` | API-ключ OpenRouter (`secrets.json`; `{api_key}` / `{clear:true}`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
-| POST | `/api/settings/slots` | Добавить нейронку в список |
+| POST | `/api/settings/slots` | Добавить нейронку (`provider`: ollama\|openrouter) |
 | DELETE | `/api/settings/slots/{id}` | Удалить пользовательский слот |
 | GET/POST | `/api/chats` | Список / создать |
 | GET/DELETE | `/api/chats/{id}` | История / удалить (409 если идёт генерация) |
@@ -252,19 +286,19 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 
 ## Правила изменений для агентов
 
-1. **Переиспользовать** `orchestra.handle` — не дублировать роутинг в `server.py`.
+1. **Переиспользовать** `qwen_orchestra.Client` / `orchestra.handle` — не дублировать роутинг в `server.py`.
 2. Стрим в UI — только через колбэки оркестра + SSE.
-3. Новые проверки ответа — в `selfcheck.py` (код проблемы + текст в `HINTS`);
+3. Новые проверки ответа — в `qwen_orchestra/selfcheck.py` (код проблемы + текст в `HINTS`);
    жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling`;
    тексты «когда модель» для LLM-роутера и список слотов — в `settings.py` / UI;
    размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`.
 4. Лаунчер readiness — только `/api/ready`; тяжёлые проверки Ollama — в `/api/health`.
 5. Не слушать `0.0.0.0` без явной просьбы пользователя.
 6. Не добавлять светлую тему / аккаунты / IDE без запроса.
-7. CLI (`orchestra_chat.py` и др.) оставлять рабочими.
+7. CLI (`orchestra_chat.py` и др.) оставлять рабочими; shim-модули в корне — для совместимости.
 8. Отвечать пользователю **по-русски**, если не попросил иначе.
 9. Коммиты — только по явной просьбе.
-10. При смене тиров / контекста / API — обновлять `README.md`, `AGENTS.md`, `.cursor/rules/qwen-orchestra.mdc`.
+10. При смене тиров / контекста / API / SDK — обновлять `README.md`, `AGENTS.md`, `.cursor/rules/qwen-orchestra.mdc`.
 11. Перед полным «найди баги по всему проекту» — сначала `CODE_AUDIT.md`; повторный аудит только после крупных правок или по просьбе; при фиксе обновляй статусы там.
 
 ## Типичный roadmap (ещё не сделано)

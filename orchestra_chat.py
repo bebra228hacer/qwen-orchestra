@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import sys
 
-from llm import installed_models
-from orchestra import MODELS, handle, missing_models, missing_optional_models
-from router import ALL_TIERS, TIER_RANK
+from qwen_orchestra.llm import installed_models
+from qwen_orchestra.orchestra import MODELS, handle, missing_models, missing_optional_models
+from qwen_orchestra.router import ALL_TIERS, TIER_RANK
 
 TIERS = tuple(sorted(ALL_TIERS, key=lambda t: (TIER_RANK.get(t, 99), t)))
 

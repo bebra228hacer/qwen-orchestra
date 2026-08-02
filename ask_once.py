@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 
-from llm import chat
+from qwen_orchestra.llm import chat
 
 MODEL = "qwen3.5:4b"
 
