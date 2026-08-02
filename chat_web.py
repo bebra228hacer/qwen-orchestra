@@ -1,5 +1,5 @@
 """
-Чат с Qwen2.5 3B + доступ в интернет (поиск и чтение страниц).
+Чат с Qwen3.5 4B + доступ в интернет (поиск и чтение страниц).
 
 Модель сама не «выходит» в сеть — этот скрипт даёт ей инструменты:
 web_search и fetch_url. Когда нужны свежие данные, модель вызывает инструмент,
@@ -18,10 +18,10 @@ import urllib.request
 from tools_web import TOOL_IMPL, TOOLS
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "qwen2.5:3b"
+MODEL = "qwen3.5:4b"
 MAX_TOOL_ROUNDS = 4
 
-SYSTEM_PROMPT = """Ты локальный ассистент Qwen2.5 с доступом в интернет через инструменты.
+SYSTEM_PROMPT = """Ты локальный ассистент Qwen3.5 с доступом в интернет через инструменты.
 
 Инструменты:
 - web_search(query) — поиск в интернете
@@ -45,6 +45,7 @@ def _ollama_chat(messages: list[dict], use_tools: bool = True) -> dict:
         "model": MODEL,
         "messages": messages,
         "stream": False,
+        "think": False,
         "options": {"temperature": 0.3},
     }
     if use_tools:

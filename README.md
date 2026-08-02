@@ -1,16 +1,18 @@
 # Qwen Orchestra
 
-Локальный оркестр моделей **Qwen2.5** поверх [Ollama](https://ollama.com): роутинг tiny → mid → heavy → xlarge (+ coder), адаптивный `num_ctx`, самопроверка ответов и веб-чат в стиле Cursor (только `127.0.0.1`, без аккаунтов).
+Локальный оркестр моделей **Qwen3.5** (+ Qwen2.5 14b) поверх [Ollama](https://ollama.com): роутинг tiny → mid → heavy → xlarge (+ coder), адаптивный `num_ctx`, самопроверка ответов и веб-чат в стиле Cursor (только `127.0.0.1`, без аккаунтов).
 
 | Tier | Модель | Роль |
 |------|--------|------|
-| tiny | `qwen2.5:0.5b` | Неоднозначные короткие запросы, приветствия |
-| mid | `qwen2.5:3b` | Обычные задачи, код, объяснения; ревью ответов |
-| heavy | `qwen2.5:7b` | Сложные задачи; эскалация после selfcheck |
+| tiny | `qwen3.5:0.8b` | Роутер, приветствия, простая арифметика |
+| mid | `qwen3.5:4b` | Обычные задачи, код, объяснения; ревью ответов |
+| heavy | `qwen3.5:9b` | Сложные задачи; эскалация после selfcheck |
 | xlarge | `qwen2.5:14b` | Верх эскалации (опционально, ~9 ГБ) |
 | coder | `qwen2.5-coder:14b` | Тяжёлый код и отладка (опционально, ~9 ГБ) |
 
-Большинство mid/heavy/web/coder запросов роутятся **без** вызова 0.5b (детерминированные правила). Ручной тир в UI тоже не дергает роутер. Эскалация не падает на неустановленный 14b.
+Большинство mid/heavy/web/coder запросов роутятся **без** вызова tiny (детерминированные правила). Ручной тир в UI тоже не дергает роутер. Эскалация не падает на неустановленный 14b. У Qwen3.5 thinking **выключен** (`think: false`) — иначе ломаются JSON-роутер и tools.
+
+Слоты моделей и **промпты роутера** («когда какую модель выбирать») настраиваются в UI: кнопка **«Модели и промпты»** в сайдбаре. Можно сменить Ollama-имя у builtin-слотов, отредактировать текст для Auto и **добавить свою нейронку** из установленных в Ollama. Defaults и файл `settings.json` — модуль `settings.py`.
 
 Поток одного запроса:
 
@@ -28,7 +30,7 @@ user → route → plan context (история + num_ctx) → worker (± web)
 
 - Windows 10/11 (лаунчер и `start.bat` рассчитаны на Windows)
 - [Python 3.10+](https://www.python.org/downloads/) в `PATH`
-- [Ollama](https://ollama.com/download) с запущенным сервисом
+- [Ollama](https://ollama.com/download) (лаунчер сам поднимет `ollama serve`, если сервис не запущен)
 - Для 14b желательно ≥8 ГБ VRAM (на 8 ГБ возможен CPU/GPU hybrid и ниже скорость)
 
 ---
@@ -51,16 +53,16 @@ python -m pip install -r requirements.txt
 ### 3. Скачать модели Ollama
 
 ```powershell
-ollama pull qwen2.5:0.5b
-ollama pull qwen2.5:3b
-ollama pull qwen2.5:7b
+ollama pull qwen3.5:0.8b
+ollama pull qwen3.5:4b
+ollama pull qwen3.5:9b
 # опционально (xlarge / coder) — лучше по одной, не параллельно:
 ollama pull qwen2.5:14b
 ollama pull qwen2.5-coder:14b
 ```
 
 Проверка: `ollama list`. Иконка Ollama в трее — сервис на `http://localhost:11434`.  
-Теги 14b по умолчанию **Q4_K_M** (~9 ГБ каждая).
+Теги 14b по умолчанию **Q4_K_M** (~9 ГБ каждая). `qwen3.5:9b` ≈ 6.6 ГБ.
 
 ### 4. Запустить веб-чат
 
@@ -105,7 +107,7 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 python orchestra_chat.py
 ```
 
-Команды: `/tier tiny|mid|heavy|xlarge|coder`, `/auto`, `/clear`, `/exit`.
+Команды: `/tier <id>`, `/tiers`, `/auto`, `/clear`, `/exit`.
 
 ```powershell
 python ask_orchestra.py "Привет!"
@@ -115,8 +117,8 @@ python ask_orchestra.py "Какая погода в Москве?"
 ### Без оркестра
 
 ```powershell
-python chat.py          # только 3B
-python chat_web.py      # 3B + интернет
+python chat.py          # только mid (qwen3.5:4b)
+python chat_web.py      # mid + интернет
 ```
 
 ---
@@ -126,9 +128,9 @@ python chat_web.py      # 3B + интернет
 | Запрос | Минимум |
 |--------|---------|
 | приветствие, `2+2` | tiny |
-| объяснения, простой код, web | mid |
-| архитектура, длинный анализ | heavy |
-| сложный код, отладка, traceback | coder |
+| объяснения, перевод, простой код, web | mid |
+| сравнение, архитектура, длинный анализ, план | heavy |
+| сервис/API, рефакторинг, тесты кода, traceback | coder |
 
 «Кратко» → потолок mid. Эскалация: tiny → mid → heavy → xlarge (`coder` → xlarge).  
 Полная таблица — в [AGENTS.md](AGENTS.md).
@@ -156,7 +158,7 @@ num_ctx = ceil_256(tokens(промпт) + 128 + reserve_ответа + safety) �
 | `llm.py` | Клиент Ollama (`num_ctx` в options) |
 | `server.py` | FastAPI + SSE, порт `8787` |
 | `web/` | Тёмный Cursor-like UI |
-| `open_web.py` | Лаунчер сервера и браузера |
+| `open_web.py` | Лаунчер: Ollama (если нужно) + сервер + браузер |
 | `AGENTS.md` | Карта для AI-агентов |
 
 ---

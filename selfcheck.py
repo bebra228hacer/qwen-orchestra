@@ -109,7 +109,7 @@ SEVERITY: dict[str, int] = {
     "uncertain": 1,
 }
 
-REVIEW_MODEL_DEFAULT = "qwen2.5:3b"
+REVIEW_MODEL_DEFAULT = "qwen3.5:4b"
 
 REVIEW_SCHEMA = {
     "type": "object",

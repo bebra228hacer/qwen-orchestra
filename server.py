@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from llm import installed_models
 from orchestra import MODELS, handle, missing_models, missing_optional_models
-from router import Tier
+import settings as app_settings
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
@@ -47,7 +47,20 @@ class CreateChatBody(BaseModel):
 
 class SendMessageBody(BaseModel):
     content: str
-    force_tier: Tier | None = None
+    force_tier: str | None = None
+
+
+class SettingsPutBody(BaseModel):
+    slots: list[dict[str, Any]]
+
+
+class AddSlotBody(BaseModel):
+    model: str
+    label: str | None = None
+    router_prompt: str | None = None
+    id: str | None = None
+    rank: int = 2
+    router_auto: bool = True
 
 
 _chats: dict[str, ChatSession] = {}
@@ -130,8 +143,56 @@ def health() -> dict[str, Any]:
         "missing": missing,
         "missing_optional": missing_optional,
         "tiers": MODELS,
+        "slots": [s.to_dict() for s in app_settings.get_settings().slots],
         "error": error,
     }
+
+
+@app.get("/api/settings")
+def get_settings() -> dict[str, Any]:
+    return app_settings.public_settings_payload()
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsPutBody) -> dict[str, Any]:
+    try:
+        saved = app_settings.update_slots(body.slots)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return app_settings.public_settings_payload(saved)
+
+
+@app.post("/api/settings/reset")
+def reset_settings() -> dict[str, Any]:
+    saved = app_settings.reset_settings()
+    return app_settings.public_settings_payload(saved)
+
+
+@app.post("/api/settings/slots")
+def add_settings_slot(body: AddSlotBody) -> dict[str, Any]:
+    try:
+        saved = app_settings.add_slot(
+            model=body.model,
+            label=body.label,
+            router_prompt=body.router_prompt,
+            slot_id=body.id,
+            rank=body.rank,
+            router_auto=body.router_auto,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return app_settings.public_settings_payload(saved)
+
+
+@app.delete("/api/settings/slots/{slot_id}")
+def delete_settings_slot(slot_id: str) -> dict[str, Any]:
+    try:
+        saved = app_settings.delete_slot(slot_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Слот не найден: {slot_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return app_settings.public_settings_payload(saved)
 
 
 @app.get("/api/chats")

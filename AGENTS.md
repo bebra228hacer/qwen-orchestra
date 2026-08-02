@@ -4,33 +4,34 @@
 
 ## Что это
 
-Локальный **оркестр LLM** поверх **Ollama** (Qwen2.5: 0.5b → 3b → 7b → 14b + coder) + **веб-чат** в стиле Cursor Chat (только тёмная тема, один пользователь, `127.0.0.1`).
+Локальный **оркестр LLM** поверх **Ollama** (Qwen3.5: 0.8b → 4b → 9b + Qwen2.5 14b/coder) + **веб-чат** в стиле Cursor Chat (только тёмная тема, один пользователь, `127.0.0.1`).
 
 Это **не** облачный бот и **не** редактор кода. Веб-UI — чат/composer текста к оркестру.
 
 ## Обязательные зависимости среды
 
 1. Сервис **Ollama** запущен (`http://localhost:11434`).
-2. Модели: `qwen2.5:0.5b`, `qwen2.5:3b`, `qwen2.5:7b` (`ollama pull …`).
+2. Модели: `qwen3.5:0.8b`, `qwen3.5:4b`, `qwen3.5:9b` (`ollama pull …`).
 3. Опционально: `qwen2.5:14b`, `qwen2.5-coder:14b` (тиры `xlarge` / `coder`, Q4_K_M ~9 ГБ).
 4. Python deps: `pip install -r requirements.txt` (`ddgs`, `fastapi`, `uvicorn`, `pydantic`).
 
-На GPU ~8 ГБ VRAM 14b часто идёт как hybrid CPU/GPU — скорость ниже, чем у 7b на 100% GPU.
+На GPU ~8 ГБ VRAM 14b часто идёт как hybrid CPU/GPU — скорость ниже, чем у 9b на 100% GPU.
 
 ## Карта файлов
 
 | Файл / папка | Роль |
 |---|---|
 | `orchestra.py` | Ядро: `handle()`, `plan_worker_context()`, цикл попыток, tools, колбэки |
-| `router.py` | Роутер на 0.5b + `tier_floor` / `tier_ceiling` |
-| `selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на 3b |
-| `llm.py` | Клиент Ollama: `chat`, `chat_stream`, `installed_models` |
+| `settings.py` | Слоты моделей + промпты роутера (`settings.json`); defaults и apply в runtime |
+| `router.py` | Роутер на tiny + `tier_floor` / `tier_ceiling`; SYSTEM из settings |
+| `selfcheck.py` | Самопроверка ответа: правила + LLM-ревью на mid (4b) |
+| `llm.py` | Клиент Ollama: `chat`, `chat_stream`, `installed_models` (+ `think: false` для Qwen3.5) |
 | `tools_web.py` | `web_search`, `fetch_url` |
 | `orchestra_chat.py` | CLI оркестра |
 | `ask_orchestra.py` | Один вопрос через оркестр |
-| `chat.py` / `ask_once.py` | Только 3B, без оркестра |
-| `chat_web.py` / `ask_web.py` | Только 3B + web tools |
-| `server.py` | FastAPI: статика + API чатов + SSE |
+| `chat.py` / `ask_once.py` | Только mid (4b), без оркестра |
+| `chat_web.py` / `ask_web.py` | Только mid + web tools |
+| `server.py` | FastAPI: статика + API чатов + SSE + `/api/settings` |
 | `web/` | UI: `index.html`, `styles.css`, `app.js` |
 | `open_web.py` | Лаунчер: старт сервера + открытие браузера |
 | `QwenChat.exe` / `QwenChat.bat` | Сборка/обёртка лаунчера |
@@ -44,9 +45,11 @@ user → route → plan context → worker (± web tools) → selfcheck
                  └──── retry на тир выше ───────────────┘  (до MAX_ATTEMPTS)
 ```
 
-- Тиры: `MODELS` в `orchestra.py` (`tiny`/`mid`/`heavy`/`xlarge`/`coder`).
-- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); 14b — `OPTIONAL_TIERS`.
-- Эскалация: tiny → mid → heavy → xlarge; `coder` → xlarge при retry.
+- Тиры: `MODELS` из `settings.py` (builtin `tiny`/`mid`/`heavy`/`xlarge`/`coder` + пользовательские слоты).
+- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); optional — `OPTIONAL_TIERS`.
+- Промпты роутера («когда использовать») — per-slot `router_prompt`; собираются в `router.SYSTEM`.
+- Эскалация: по `rank` слотов; `coder` → xlarge при retry.
+- UI: «Модели и промпты» — remap Ollama-имён, правка промптов, кнопка «Добавить нейронку».
 - Публичный вход: `orchestra.handle(user_text, history, force_tier=…, stream=…, verbose=…, on_token=…, on_status=…)`.
 - История в `handle` **без** текущего user-сообщения (сервер так и передаёт; CLI тоже; если хвост дублирует вопрос — он снимается).
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
@@ -56,36 +59,37 @@ user → route → plan context → worker (± web tools) → selfcheck
 
 ## Auto-режим: когда какая модель
 
-Решение 0.5b **ограничено** детерминированными правилами `router.tier_floor()` —
-модель может поднять тир, но не опустить ниже нужного (0.5b систематически
+Решение tiny (0.8b) **ограничено** детерминированными правилами `router.tier_floor()` —
+модель может поднять тир, но не опустить ниже нужного (tiny систематически
 недооценивает сложность). `router.tier_ceiling()` держит потолок.
 
 | Признак запроса | Минимум |
 |---|---|
-| приветствие, спасибо/пока, `2+2` | tiny |
-| длина > 60 символов | mid |
-| «объясни / напиши / переведи / сделай / как …», «что такое» | mid |
-| код, SQL, git/pip/npm, ссылки, regex | mid |
-| нужны свежие данные (web) | mid |
-| длина > 400 символов, или 3+ вопроса в сообщении | heavy |
-| архитектура, рефакторинг, оптимизация, сравнение, доказательство | heavy |
-| тесты, обработка ошибок, миграция, план внедрения | heavy |
-| запрос на код + описание > 90 символов или 3+ требований | coder |
-| traceback / стектрейс / отладка ошибки | coder |
+| приветствие, спасибо/пока, простая арифметика `2+2` | tiny |
+| объяснения, перевод, советы, how-to, «что такое», web | mid |
+| простой код / скрипт / 3+ слова / длина > 40 | mid |
+| сравнение, архитектура, доказательство, длинный анализ | heavy |
+| длина > 350 (или > 220 без «кратко»), 3+ вопроса, пошаговый план | heavy |
+| traceback / стектрейс / «ошибка в коде» / отладка | coder |
+| сервис/API/приложение, рефакторинг, unit-тесты, JWT+стек | coder |
+| код + ТЗ > 80 символов или ≥2 требований | coder |
 
 Дополнительно:
 
-- «кратко / коротко / в двух словах» → потолок **mid** (не гоняем 7b/14b зря).
+- По умолчанию осмысленный запрос — не ниже **mid** (tiny не гадает на реальных вопросах).
+- Голые слова вроде «тест» / «не работает» **без** кодового контекста больше не поднимают heavy/coder.
+- «кратко / коротко / в двух словах» → потолок **mid** (не гоняем 9b/14b зря).
 - `xlarge` (14b) в auto — обычно через эскалацию после selfcheck; вручную — селектор.
-- Детерминированные shortcuts **без** вызова 0.5b: tiny-приветствия, web-intent,
-  floor `mid`/`heavy`/`coder`. 0.5b остаётся для неоднозначных коротких запросов.
+- Детерминированные shortcuts **без** вызова tiny: приветствия, web-intent,
+  floor `mid`/`heavy`/`coder`. tiny остаётся для неоднозначных коротких запросов.
 - `need_web` — детерминированно (`need_web()` / hard+soft ключи, в т.ч. «поищи»,
   «погугли»); при `force_tier` LLM-роутер **не** вызывается.
-- `ok=false` от 0.5b **игнорируется**, если запрос осмысленный (`looks_meaningful`):
+- `ok=false` от tiny **игнорируется**, если запрос осмысленный (`looks_meaningful`):
   есть слова с гласными или простая арифметика. Пустой ввод и «??» отклоняются сразу,
-  мусор — после второго мнения 3b.
+  мусор — после второго мнения mid (4b).
 - Ручной выбор тира (`force_tier` / селектор в UI) обходит модельный роутер;
   web определяется правилами.
+- Qwen3.5 вызывается с `think: false` (см. `llm.py`), чтобы не ломать JSON/tools.
 
 ## Контекст и VRAM
 
@@ -158,13 +162,17 @@ Web-tool результаты **кэшируются** между retry (пов�
 | Метод | Путь | Назначение |
 |---|---|---|
 | GET | `/api/ready` | Быстрый ping (лаунчер; **без** Ollama) |
-| GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` |
+| GET | `/api/health` | Ollama + `missing` + `missing_optional` + `tiers` + `slots` |
+| GET/PUT | `/api/settings` | Слоты моделей + промпты роутера (`settings.json`) |
+| POST | `/api/settings/reset` | Сброс к defaults |
+| POST | `/api/settings/slots` | Добавить нейронку в список |
+| DELETE | `/api/settings/slots/{id}` | Удалить пользовательский слот |
 | GET/POST | `/api/chats` | Список / создать |
 | GET/DELETE | `/api/chats/{id}` | История / удалить |
 | POST | `/api/chats/{id}/clear` | Очистить |
 | POST | `/api/chats/{id}/messages` | SSE ответ |
 
-Тело сообщения: `{ "content": "...", "force_tier": null|"tiny"|"mid"|"heavy"|"xlarge"|"coder" }`.
+Тело сообщения: `{ "content": "...", "force_tier": null|"<slot_id>" }`.
 
 SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 
@@ -195,7 +203,10 @@ python open_web.py
 # или QwenChat.exe / QwenChat.bat
 ```
 
-Лаунчер ждёт `/api/ready` (не `/api/health`), браузер открывает через `os.startfile` / `cmd start`.
+Лаунчер сначала поднимает **Ollama** (`ollama serve`, если порт 11434 молчит),
+затем ждёт `/api/ready` веб-сервера (не `/api/health`), браузер — через
+`os.startfile` / `cmd start`. Ollama, **запущенная лаунчером**, гасится вместе
+с сервером при Ctrl+C / закрытии консоли (уже работавшую до старта не трогаем).
 `QwenChat.exe` при старте сервера вызывает системный `python` (не себя). После правок `open_web.py` пересобрать:
 
 ```powershell
@@ -216,7 +227,8 @@ pyinstaller --noconfirm --onefile --console --name QwenChat --distpath . --workp
 1. **Переиспользовать** `orchestra.handle` — не дублировать роутинг в `server.py`.
 2. Стрим в UI — только через колбэки оркестра + SSE.
 3. Новые проверки ответа — в `selfcheck.py` (код проблемы + текст в `HINTS`);
-   правила выбора модели — в `router.tier_floor` / `tier_ceiling`;
+   жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling`;
+   тексты «когда модель» для LLM-роутера и список слотов — в `settings.py` / UI;
    размер окна / история — в `plan_worker_context` / связанные хелперы в `orchestra.py`.
 4. Лаунчер readiness — только `/api/ready`; тяжёлые проверки Ollama — в `/api/health`.
 5. Не слушать `0.0.0.0` без явной просьбы пользователя.

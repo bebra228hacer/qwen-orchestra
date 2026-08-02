@@ -2,6 +2,9 @@
 
 `num_ctx` передаётся в `options` каждого chat/chat_stream; размер окна
 подбирает оркестр (`plan_worker_context`), не этот модуль.
+
+Для Qwen3/3.5 в payload уходит top-level `think: false` — иначе модель
+тратит токены на reasoning и ломает JSON-роутер / tool_calls.
 """
 
 from __future__ import annotations
@@ -24,6 +27,14 @@ def _request(payload: dict, timeout: int):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _think_default(model: str) -> bool | None:
+    """Qwen3/3.5 по умолчанию думают — для оркестра это ломает JSON/tools/latency."""
+    name = (model or "").lower()
+    if name.startswith("qwen3") or "qwen3." in name:
+        return False
+    return None
+
+
 def _payload(
     model: str,
     messages: list[dict],
@@ -34,6 +45,7 @@ def _payload(
     temperature: float,
     num_ctx: int,
     keep_alive: str | None,
+    think: bool | None,
 ) -> dict:
     payload: dict = {
         "model": model,
@@ -47,6 +59,10 @@ def _payload(
         payload["format"] = fmt
     if keep_alive:
         payload["keep_alive"] = keep_alive
+    # top-level (не в options): иначе Ollama игнорирует think
+    resolved = _think_default(model) if think is None else think
+    if resolved is not None:
+        payload["think"] = resolved
     return payload
 
 
@@ -59,6 +75,7 @@ def chat(
     temperature: float = 0.3,
     num_ctx: int = 8192,
     keep_alive: str | None = None,
+    think: bool | None = None,
     timeout: int = 600,
 ) -> dict:
     """Один запрос без стриминга. Возвращает объект message целиком."""
@@ -71,6 +88,7 @@ def chat(
         temperature=temperature,
         num_ctx=num_ctx,
         keep_alive=keep_alive,
+        think=think,
     )
     with _request(payload, timeout) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -87,6 +105,7 @@ def chat_stream(
     temperature: float = 0.3,
     num_ctx: int = 8192,
     keep_alive: str | None = None,
+    think: bool | None = None,
     timeout: int = 600,
 ) -> str:
     """Потоковый ответ. Токены отдаются в on_token, полный текст возвращается."""
@@ -99,6 +118,7 @@ def chat_stream(
         temperature=temperature,
         num_ctx=num_ctx,
         keep_alive=keep_alive,
+        think=think,
     )
     parts: list[str] = []
     with _request(payload, timeout) as resp:

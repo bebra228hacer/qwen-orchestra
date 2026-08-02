@@ -18,12 +18,10 @@
         <label class="field-label" for="tier-select">Tier</label>
         <select id="tier-select" class="tier-select">
           <option value="auto">Auto</option>
-          <option value="tiny">tiny · 0.5b</option>
-          <option value="mid">mid · 3b</option>
-          <option value="heavy">heavy · 7b</option>
-          <option value="xlarge">xlarge · 14b</option>
-          <option value="coder">coder · 14b</option>
         </select>
+        <div class="tier-actions">
+          <button type="button" class="btn btn-ghost btn-block" id="btn-models">Модели и промпты</button>
+        </div>
         <div class="health" id="health" title="Статус Ollama">Проверка…</div>
       </div>
     </aside>
@@ -49,9 +47,42 @@
           ></textarea>
           <button type="button" class="btn btn-send" id="btn-send" disabled>Send</button>
         </div>
-        <div class="composer-hint" id="status-line">localhost · оркестр tiny → mid → heavy → 14b · adaptive ctx</div>
+        <div class="composer-hint" id="status-line">localhost · оркестр 0.8b → 4b → 9b → 14b · adaptive ctx</div>
       </footer>
     </main>
+  </div>
+
+  <div class="modal-backdrop" id="models-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="models-modal-title">
+      <header class="modal-header">
+        <h2 id="models-modal-title">Модели и промпты роутера</h2>
+        <button type="button" class="btn btn-ghost" id="btn-models-close" title="Закрыть">✕</button>
+      </header>
+      <p class="modal-hint">
+        Для каждой нейронки — когда Auto её выбирает. Builtin-слоты нельзя удалить;
+        можно сменить модель Ollama и текст промпта. Новые слоты — кнопка ниже.
+      </p>
+      <div class="modal-body" id="models-list"></div>
+      <div class="add-slot-form" id="add-slot-form">
+        <div class="field-label">Добавить нейронку</div>
+        <div class="add-slot-row">
+          <select id="add-slot-model" class="tier-select" title="Модель из Ollama"></select>
+          <input id="add-slot-id" class="text-input" type="text" placeholder="id (необяз.)" maxlength="32" />
+          <input id="add-slot-rank" class="text-input rank-input" type="number" value="2" min="0" max="9" title="rank" />
+        </div>
+        <input id="add-slot-label" class="text-input" type="text" placeholder="Подпись в списке" />
+        <textarea id="add-slot-prompt" class="prompt-input" rows="2" placeholder="Когда роутеру выбирать эту модель…"></textarea>
+        <label class="check-label"><input type="checkbox" id="add-slot-auto" checked /> Участвует в Auto-роутере</label>
+      </div>
+      <footer class="modal-footer">
+        <button type="button" class="btn btn-ghost" id="btn-models-reset">Сбросить по умолчанию</button>
+        <div class="modal-footer-right">
+          <button type="button" class="btn btn-primary" id="btn-models-add">Добавить нейронку</button>
+          <button type="button" class="btn btn-send" id="btn-models-save">Сохранить</button>
+        </div>
+      </footer>
+      <div class="modal-status" id="models-status"></div>
+    </div>
   </div>
   <script src="/static/app.js"></script>
 </body>

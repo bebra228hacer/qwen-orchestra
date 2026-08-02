@@ -21,3 +21,6 @@ QwenChat.exe
 *.swp
 Thumbs.db
 Desktop.ini
+
+# User orchestra settings (models + router prompts)
+settings.json

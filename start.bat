@@ -5,7 +5,7 @@ title Qwen Orchestra
 cls
 echo.
 echo  ========================================
-echo   Qwen Orchestra  -  0.5b / 3b / 7b
+echo   Qwen Orchestra  -  0.8b / 4b / 9b
 echo  ========================================
 echo.
 echo   1) �થ��� (���� + �᪠����)
@@ -14,14 +14,14 @@ echo.
 echo   2) ���� ����� �१ �થ���
 echo      python ask_orchestra.py
 echo.
-echo   3) ��� 3B + ���୥�
+echo   3) ��� 4b + ���୥�
 echo      python chat_web.py
 echo.
-echo   4) ��� ⮫쪮 3B
+echo   4) ��� ⮫쪮 4b
 echo      python chat.py
 echo.
-echo   5) Ollama: qwen2.5:3b
-echo      ollama run qwen2.5:3b
+echo   5) Ollama: qwen3.5:4b
+echo      ollama run qwen3.5:4b
 echo.
 echo   6) ���-�� (Cursor UI)
 echo      python server.py
@@ -64,7 +64,7 @@ goto end
 
 :run5
 echo.
-ollama run qwen2.5:3b
+ollama run qwen3.5:4b
 goto end
 
 :run6

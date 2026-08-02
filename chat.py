@@ -1,7 +1,7 @@
 """
-Простой чат с локальной Qwen2.5 3B через Ollama API.
+Простой чат с локальной Qwen3.5 4B через Ollama API.
 Запуск: python chat.py
-Требует: Ollama запущен, модель скачана (ollama pull qwen2.5:3b)
+Требует: Ollama запущен, модель скачана (ollama pull qwen3.5:4b)
 """
 
 from __future__ import annotations
@@ -11,11 +11,13 @@ import urllib.error
 import urllib.request
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL = "qwen2.5:3b"
+MODEL = "qwen3.5:4b"
 
 
 def chat(messages: list[dict[str, str]], stream: bool = True) -> str:
-    payload = json.dumps({"model": MODEL, "messages": messages, "stream": stream}).encode("utf-8")
+    payload = json.dumps(
+        {"model": MODEL, "messages": messages, "stream": stream, "think": False}
+    ).encode("utf-8")
     req = urllib.request.Request(
         OLLAMA_URL,
         data=payload,

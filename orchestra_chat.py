@@ -1,8 +1,8 @@
 """
 Интерактивный оркестр моделей:
-  tiny   = qwen2.5:0.5b       (валидация + лёгкие ответы)
-  mid    = qwen2.5:3b         (обычные задачи)
-  heavy  = qwen2.5:7b         (сложное)
+  tiny   = qwen3.5:0.8b       (валидация + лёгкие ответы)
+  mid    = qwen3.5:4b         (обычные задачи)
+  heavy  = qwen3.5:9b         (сложное)
   xlarge = qwen2.5:14b        (очень сложное / эскалация)
   coder  = qwen2.5-coder:14b  (код и отладка)
 
@@ -15,14 +15,14 @@ import sys
 
 from llm import installed_models
 from orchestra import MODELS, handle, missing_models, missing_optional_models
-from router import ALL_TIERS
+from router import ALL_TIERS, TIER_RANK
 
-TIERS = tuple(sorted(ALL_TIERS, key=lambda t: ("tiny", "mid", "heavy", "xlarge", "coder").index(t)))
+TIERS = tuple(sorted(ALL_TIERS, key=lambda t: (TIER_RANK.get(t, 99), t)))
 
 
 def main() -> None:
-    print("Оркестр Qwen: 0.5b → 3b → 7b → 14b (+ coder)")
-    print("Команды: /exit  /clear  /tier tiny|mid|heavy|xlarge|coder  /auto")
+    print("Оркестр Qwen: слоты из settings.json (модели + промпты роутера)")
+    print("Команды: /exit  /clear  /tier <id>  /auto  /tiers")
     print()
 
     try:
@@ -42,7 +42,7 @@ def main() -> None:
 
     optional = missing_optional_models(have)
     if optional:
-        print("Опциональные модели (xlarge / coder) не установлены:")
+        print("Опциональные модели не установлены:")
         for m in optional:
             print(f"  ollama pull {m}")
         print()
@@ -70,13 +70,18 @@ def main() -> None:
             force_tier = None
             print("Авто-роутинг включён.\n")
             continue
+        if user == "/tiers":
+            for tid in TIERS:
+                print(f"  {tid}: {MODELS.get(tid)}")
+            print()
+            continue
         if user.startswith("/tier"):
             parts = user.split()
-            if len(parts) == 2 and parts[1] in TIERS:
-                force_tier = parts[1]  # type: ignore[assignment]
+            if len(parts) == 2 and parts[1] in ALL_TIERS:
+                force_tier = parts[1]
                 print(f"Принудительный tier: {force_tier} ({MODELS[force_tier]})\n")
             else:
-                print("Использование: /tier tiny|mid|heavy|xlarge|coder\n")
+                print("Использование: /tier " + "|".join(TIERS) + "\n")
             continue
 
         # history без текущего user — handle сам добавит вопрос в промпт

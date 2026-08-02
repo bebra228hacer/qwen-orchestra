@@ -9,17 +9,20 @@ alwaysApply: true
 
 ## Стек
 
-- Ядро: `orchestra.handle` ← `router.py` + `selfcheck.py` + `llm.py` + `tools_web.py`
+- Ядро: `orchestra.handle` ← `router.py` + `selfcheck.py` + `llm.py` + `tools_web.py` + `settings.py`
 - Цикл: `route → plan_worker_context → worker → selfcheck → retry` (до `MAX_ATTEMPTS`)
 - Веб: `server.py` (FastAPI, `127.0.0.1:8787`) + `web/`
-- Лаунчер: `open_web.py` / `QwenChat.exe` (ждёт `/api/ready`, открывает браузер через Windows API)
+- Лаунчер: `open_web.py` / `QwenChat.exe` (при необходимости `ollama serve`, ждёт `/api/ready`, открывает браузер; свою Ollama гасит при выходе)
 
 ## Тиры
 
-`tiny=qwen2.5:0.5b` · `mid=qwen2.5:3b` · `heavy=qwen2.5:7b` · `xlarge=qwen2.5:14b` · `coder=qwen2.5-coder:14b`
+Defaults: `tiny=qwen3.5:0.8b` · `mid=qwen3.5:4b` · `heavy=qwen3.5:9b` · `xlarge=qwen2.5:14b` · `coder=qwen2.5-coder:14b`
 
-Эскалация: tiny → mid → heavy → xlarge; тяжёлый код стартует на `coder`. 14b опциональны для health.
-Неустановленный optional-тир при эскалации/старте пропускается (fallback на ближайший установленный).
+Слоты и промпты роутера («когда использовать») — `settings.py` / `settings.json`, UI «Модели и промпты».
+Эскалация по `rank`; тяжёлый код стартует на `coder`. Optional-тиры для health пропускаются, если не установлены.
+Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код.
+Тексты для LLM-роутера — editable per-slot `router_prompt` (не путать с `tier_floor`).
+Для Qwen3.5 в `llm.py` всегда `think: false` (роутер/tools/стрим без thinking).
 
 ## Контекст
 
@@ -29,7 +32,8 @@ Web-tools: кэш между retry, dedupe, лимит вызовов; `fetch_ur
 
 ## При изменениях
 
-- Правила выбора модели — только в `router.tier_floor` / `tier_ceiling` (+ shortcuts в `route`)
+- Жёсткий floor/ceiling — в `router.tier_floor` / `tier_ceiling` (+ shortcuts в `route`)
+- Тексты «когда какую модель» для LLM-роутера — `settings.py` / UI (не дублировать в коде)
 - Размер окна / история — только в `plan_worker_context` (+ хелперы рядом)
 - Новые проверки ответа — только в `selfcheck.py` (код проблемы + `HINTS`)
 - Не дублировать оркестр в сервере; стрим через `on_token`/`on_status` + SSE

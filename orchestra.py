@@ -1,4 +1,4 @@
-"""Оркестр: tiny (0.5b) → mid (3b) → heavy (7b) → xlarge (14b) + coder.
+"""Оркестр: tiny (3.5 0.8b) → mid (3.5 4b) → heavy (3.5 9b) → xlarge (14b) + coder.
 
 Цикл одного запроса:
     route → plan_worker_context → worker → selfcheck → (retry на старшем тире)
@@ -23,18 +23,19 @@ from llm import chat, chat_stream, installed_models
 from router import ALL_TIERS, TIER_ORDER, TIER_RANK, RouteDecision, Tier, need_web, route
 from selfcheck import Verdict
 from tools_web import TOOL_IMPL, TOOLS
+import settings as app_settings
 
-MODELS: dict[Tier, str] = {
-    "tiny": "qwen2.5:0.5b",
-    "mid": "qwen2.5:3b",
-    "heavy": "qwen2.5:7b",
+MODELS: dict[str, str] = {
+    "tiny": "qwen3.5:0.8b",
+    "mid": "qwen3.5:4b",
+    "heavy": "qwen3.5:9b",
     "xlarge": "qwen2.5:14b",
     "coder": "qwen2.5-coder:14b",
 }
 
 # Без этих моделей оркестр не стартует; 14b — опционально
-REQUIRED_TIERS: tuple[Tier, ...] = ("tiny", "mid", "heavy")
-OPTIONAL_TIERS: tuple[Tier, ...] = ("xlarge", "coder")
+REQUIRED_TIERS: tuple[str, ...] = ("tiny", "mid", "heavy")
+OPTIONAL_TIERS: tuple[str, ...] = ("xlarge", "coder")
 
 MAX_TOOL_ROUNDS = 4
 MAX_TOOL_CALLS = 8
@@ -42,12 +43,12 @@ TOOL_RESULT_CHARS = 4000
 
 # Сколько всего попыток на один запрос (1 основная + повторы после самопроверки)
 MAX_ATTEMPTS = 3
-# LLM-ревью ответа (ловит ошибки и уход от вопроса); проверяющий — 3b
+# LLM-ревью ответа (ловит ошибки и уход от вопроса); проверяющий — mid
 SELFCHECK_LLM = True
 SELFCHECK_MODEL = MODELS["mid"]
 
 # num_ctx = ceil_256(prompt + template + reserve_ответа + safety), clamp [MIN…MAX]
-_COMPLEX_TIERS: frozenset[Tier] = frozenset({"heavy", "xlarge", "coder"})
+_COMPLEX_TIERS: frozenset[str] = frozenset({"heavy", "xlarge", "coder"})
 NUM_CTX_MIN = 256
 NUM_CTX_MAX = 8192
 NUM_CTX_FULL = NUM_CTX_MAX
@@ -73,6 +74,9 @@ RETRY_SYSTEM = """Предыдущая попытка ответа забрак�
 
 Ответь на вопрос заново и полностью. Не упоминай предыдущие попытки,
 не извиняйся и не благодари за замечание."""
+
+# Подтянуть settings.json (модели + промпты роутера) при импорте
+app_settings.bootstrap()
 
 _SEARCH_RE = re.compile(r"(?:SEARCH|ПОИСК)\s*:\s*(.+)", re.IGNORECASE)
 _FETCH_RE = re.compile(r"(?:FETCH|ОТКРЫТЬ)\s*:\s*(https?://\S+)", re.IGNORECASE)
@@ -152,6 +156,10 @@ def _emit_token(on_token: TokenCallback | None, text: str) -> None:
         on_token(text)
 
 
+def _rank(tier: str) -> int:
+    return int(TIER_RANK.get(tier, 1))
+
+
 def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
     """Подобрать установленную модель: тот же тир, иначе ближайший ниже/альтернатива."""
     if not available:
@@ -164,23 +172,22 @@ def _fit_tier(tier: Tier, available: set[Tier]) -> Tier:
         return "coder"
     # вниз по лестнице размера
     for t in reversed(TIER_ORDER):
-        if TIER_RANK[t] <= TIER_RANK[tier] and t in available:
+        if _rank(t) <= _rank(tier) and t in available:
             return t
     for t in TIER_ORDER:
         if t in available:
             return t
-    # coder единственный доступный
     return next(iter(available))
 
 
 def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
     """Следующий установленный тир при эскалации: coder → xlarge, иначе по лестнице."""
     if available is None:
-        # без списка — старое поведение по лестнице (тесты / offline)
         if tier == "coder":
             return "xlarge"
         if tier not in TIER_ORDER:
-            return tier
+            higher = [t for t in TIER_ORDER if _rank(t) > _rank(tier)]
+            return higher[0] if higher else None
         idx = TIER_ORDER.index(tier)
         nxt = TIER_ORDER[min(idx + 1, len(TIER_ORDER) - 1)]
         return None if nxt == tier else nxt
@@ -191,17 +198,15 @@ def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
                 return cand
         return None
 
-    if tier not in TIER_ORDER:
-        return None
-    idx = TIER_ORDER.index(tier)
-    for cand in TIER_ORDER[idx + 1 :]:
-        if cand in available:
+    ranked = sorted(available, key=lambda t: (_rank(t), t))
+    for cand in ranked:
+        if _rank(cand) > _rank(tier):
             return cand
     return None
 
 
 def _escalated(start: Tier, final: Tier) -> bool:
-    if TIER_RANK[final] > TIER_RANK[start]:
+    if _rank(final) > _rank(start):
         return True
     # coder ↔ xlarge: смена специализации тоже эскалация
     return start != final and {start, final} <= {"coder", "xlarge"}

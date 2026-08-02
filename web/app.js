@@ -13,6 +13,20 @@
     tierSelect: $("#tier-select"),
     health: $("#health"),
     statusLine: $("#status-line"),
+    btnModels: $("#btn-models"),
+    modelsModal: $("#models-modal"),
+    modelsList: $("#models-list"),
+    modelsStatus: $("#models-status"),
+    btnModelsClose: $("#btn-models-close"),
+    btnModelsSave: $("#btn-models-save"),
+    btnModelsAdd: $("#btn-models-add"),
+    btnModelsReset: $("#btn-models-reset"),
+    addSlotModel: $("#add-slot-model"),
+    addSlotId: $("#add-slot-id"),
+    addSlotRank: $("#add-slot-rank"),
+    addSlotLabel: $("#add-slot-label"),
+    addSlotPrompt: $("#add-slot-prompt"),
+    addSlotAuto: $("#add-slot-auto"),
   };
 
   const state = {
@@ -20,6 +34,8 @@
     activeId: null,
     busy: false,
     selectGen: 0,
+    ollamaModels: [],
+    slots: [],
   };
 
   function forceTier() {
@@ -43,6 +59,7 @@
     els.btnClear.disabled = busy || !state.activeId;
     els.btnDelete.disabled = busy || !state.activeId;
     els.tierSelect.disabled = busy;
+    if (els.btnModels) els.btnModels.disabled = busy;
   }
 
   function autosize() {
@@ -72,9 +89,266 @@
     return res;
   }
 
+  function populateTierSelect(slots) {
+    const prev = els.tierSelect.value || "auto";
+    els.tierSelect.innerHTML = "";
+    const auto = document.createElement("option");
+    auto.value = "auto";
+    auto.textContent = "Auto";
+    els.tierSelect.appendChild(auto);
+    for (const s of slots || []) {
+      const opt = document.createElement("option");
+      opt.value = s.id;
+      opt.textContent = s.label || `${s.id} · ${s.model}`;
+      els.tierSelect.appendChild(opt);
+    }
+    const ok = [...els.tierSelect.options].some((o) => o.value === prev);
+    els.tierSelect.value = ok ? prev : "auto";
+  }
+
+  function fillModelSelect(selectEl, selected) {
+    selectEl.innerHTML = "";
+    const models = state.ollamaModels.length
+      ? state.ollamaModels
+      : selected
+        ? [selected]
+        : [];
+    if (!models.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "Нет моделей Ollama";
+      selectEl.appendChild(opt);
+      return;
+    }
+    for (const name of models) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      selectEl.appendChild(opt);
+    }
+    if (selected && models.includes(selected)) {
+      selectEl.value = selected;
+    } else if (selected) {
+      const opt = document.createElement("option");
+      opt.value = selected;
+      opt.textContent = selected + " (не установлена)";
+      selectEl.appendChild(opt);
+      selectEl.value = selected;
+    }
+  }
+
+  function setModelsStatus(text, kind) {
+    els.modelsStatus.textContent = text || "";
+    els.modelsStatus.className = "modal-status" + (kind ? " " + kind : "");
+  }
+
+  function renderModelsList(slots) {
+    state.slots = (slots || []).map((s) => ({ ...s }));
+    els.modelsList.innerHTML = "";
+    for (const slot of state.slots) {
+      const card = document.createElement("div");
+      card.className = "slot-card";
+      card.dataset.id = slot.id;
+
+      const head = document.createElement("div");
+      head.className = "slot-card-head";
+      const idEl = document.createElement("span");
+      idEl.className = "slot-id";
+      idEl.textContent = slot.id + (slot.builtin ? " · builtin" : "");
+      head.appendChild(idEl);
+      if (!slot.builtin && !slot.required) {
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "btn btn-ghost danger";
+        del.textContent = "Удалить";
+        del.addEventListener("click", () => removeSlot(slot.id));
+        head.appendChild(del);
+      }
+      card.appendChild(head);
+
+      const meta = document.createElement("div");
+      meta.className = "slot-meta";
+      const modelSel = document.createElement("select");
+      modelSel.className = "tier-select slot-model";
+      fillModelSelect(modelSel, slot.model);
+      const rankInp = document.createElement("input");
+      rankInp.className = "text-input rank-input slot-rank";
+      rankInp.type = "number";
+      rankInp.min = "0";
+      rankInp.max = "9";
+      rankInp.value = String(slot.rank ?? 1);
+      rankInp.title = "rank (сила / эскалация)";
+      meta.appendChild(modelSel);
+      meta.appendChild(rankInp);
+      card.appendChild(meta);
+
+      const labelInp = document.createElement("input");
+      labelInp.className = "text-input slot-label";
+      labelInp.type = "text";
+      labelInp.value = slot.label || "";
+      labelInp.placeholder = "Подпись";
+      card.appendChild(labelInp);
+
+      const promptInp = document.createElement("textarea");
+      promptInp.className = "prompt-input slot-prompt";
+      promptInp.rows = 3;
+      promptInp.value = slot.router_prompt || "";
+      promptInp.placeholder = "Когда роутеру выбирать эту модель…";
+      card.appendChild(promptInp);
+
+      const autoLab = document.createElement("label");
+      autoLab.className = "check-label";
+      const autoCb = document.createElement("input");
+      autoCb.type = "checkbox";
+      autoCb.className = "slot-auto";
+      autoCb.checked = !!slot.router_auto;
+      autoLab.appendChild(autoCb);
+      autoLab.appendChild(document.createTextNode(" Участвует в Auto-роутере"));
+      card.appendChild(autoLab);
+
+      els.modelsList.appendChild(card);
+    }
+  }
+
+  function collectSlotsFromDom() {
+    const out = [];
+    for (const card of els.modelsList.querySelectorAll(".slot-card")) {
+      const id = card.dataset.id;
+      const prev = state.slots.find((s) => s.id === id) || {};
+      out.push({
+        id,
+        model: card.querySelector(".slot-model").value,
+        label: card.querySelector(".slot-label").value.trim(),
+        router_prompt: card.querySelector(".slot-prompt").value.trim(),
+        rank: Number(card.querySelector(".slot-rank").value) || 0,
+        router_auto: card.querySelector(".slot-auto").checked,
+        required: !!prev.required,
+        optional: prev.optional !== false,
+        builtin: !!prev.builtin,
+      });
+    }
+    return out;
+  }
+
+  async function loadSettings() {
+    const data = await api("/api/settings");
+    renderModelsList(data.slots || []);
+    populateTierSelect(data.slots || []);
+    fillModelSelect(els.addSlotModel, els.addSlotModel.value || "");
+    return data;
+  }
+
+  async function openModelsModal() {
+    setModelsStatus("");
+    try {
+      await refreshHealth();
+      await loadSettings();
+      els.modelsModal.hidden = false;
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+      els.modelsModal.hidden = false;
+    }
+  }
+
+  function closeModelsModal() {
+    els.modelsModal.hidden = true;
+  }
+
+  async function saveModels() {
+    setModelsStatus("Сохранение…");
+    try {
+      const slots = collectSlotsFromDom();
+      const data = await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ slots }),
+      });
+      renderModelsList(data.slots || []);
+      populateTierSelect(data.slots || []);
+      setModelsStatus("Сохранено", "ok");
+      await refreshHealth();
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
+  async function addModelSlot() {
+    const model = els.addSlotModel.value.trim();
+    if (!model) {
+      setModelsStatus("Выберите модель Ollama", "err");
+      return;
+    }
+    setModelsStatus("Добавление…");
+    try {
+      const body = {
+        model,
+        label: els.addSlotLabel.value.trim() || null,
+        router_prompt: els.addSlotPrompt.value.trim() || null,
+        id: els.addSlotId.value.trim() || null,
+        rank: Number(els.addSlotRank.value) || 2,
+        router_auto: els.addSlotAuto.checked,
+      };
+      const data = await api("/api/settings/slots", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      renderModelsList(data.slots || []);
+      populateTierSelect(data.slots || []);
+      els.addSlotId.value = "";
+      els.addSlotLabel.value = "";
+      els.addSlotPrompt.value = "";
+      els.addSlotRank.value = "2";
+      els.addSlotAuto.checked = true;
+      setModelsStatus("Добавлено", "ok");
+      await refreshHealth();
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
+  async function removeSlot(id) {
+    if (!confirm(`Удалить слот «${id}»?`)) return;
+    setModelsStatus("Удаление…");
+    try {
+      const data = await api(`/api/settings/slots/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      renderModelsList(data.slots || []);
+      populateTierSelect(data.slots || []);
+      setModelsStatus("Удалено", "ok");
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
+  async function resetModels() {
+    if (!confirm("Сбросить модели и промпты роутера к значениям по умолчанию?")) return;
+    setModelsStatus("Сброс…");
+    try {
+      const data = await api("/api/settings/reset", { method: "POST", body: "{}" });
+      renderModelsList(data.slots || []);
+      populateTierSelect(data.slots || []);
+      setModelsStatus("Сброшено к defaults", "ok");
+      await refreshHealth();
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
   async function refreshHealth() {
     try {
       const h = await api("/api/health");
+      state.ollamaModels = h.models || [];
+      if (h.slots) {
+        populateTierSelect(h.slots);
+      } else if (h.tiers) {
+        populateTierSelect(
+          Object.entries(h.tiers).map(([id, model]) => ({
+            id,
+            model,
+            label: `${id} · ${model}`,
+          }))
+        );
+      }
       if (!h.ollama) {
         els.health.className = "health err";
         els.health.textContent = "Ollama недоступна" + (h.error ? `: ${h.error}` : "");
@@ -430,10 +704,26 @@
   els.btnNew.addEventListener("click", newChat);
   els.btnClear.addEventListener("click", clearChat);
   els.btnDelete.addEventListener("click", deleteChat);
+  els.btnModels.addEventListener("click", openModelsModal);
+  els.btnModelsClose.addEventListener("click", closeModelsModal);
+  els.btnModelsSave.addEventListener("click", saveModels);
+  els.btnModelsAdd.addEventListener("click", addModelSlot);
+  els.btnModelsReset.addEventListener("click", resetModels);
+  els.modelsModal.addEventListener("click", (e) => {
+    if (e.target === els.modelsModal) closeModelsModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.modelsModal.hidden) closeModelsModal();
+  });
 
   async function init() {
     await refreshHealth();
     setInterval(refreshHealth, 30000);
+    try {
+      await loadSettings();
+    } catch (_) {
+      /* health уже заполнил select */
+    }
     await loadChats();
     if (state.chats.length) {
       await selectChat(state.chats[0].id);
