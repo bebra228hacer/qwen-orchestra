@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import settings as app_settings
-from .llm import get_ollama_host, installed_models, set_ollama_host
+from .llm import GenOptions, get_ollama_host, installed_models, set_ollama_host
 from .orchestra import (
     MODELS,
     OrchestraResult,
@@ -108,8 +108,24 @@ class Client:
         stream: bool = True,
         on_token: TokenCallback | None = None,
         on_status: StatusCallback | None = None,
+        gen: GenOptions | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+        num_predict: int | None = None,
+        repeat_penalty: float | None = None,
+        presence_penalty: float | None = None,
+        frequency_penalty: float | None = None,
+        stop: list[str] | tuple[str, ...] | str | None = None,
+        keep_alive: str | None = None,
     ) -> OrchestraResult:
-        """Полный цикл оркестра. По умолчанию без print в stdout."""
+        """Полный цикл оркестра. По умолчанию без print в stdout.
+
+        Сэмплинг воркера: ``temperature`` / ``gen=GenOptions(...)`` и соседние
+        параметры (``top_p``, ``seed``, ``num_predict``, …). Роутер и selfcheck
+        всегда с temperature=0 и эти опции не меняют.
+        """
         return handle(
             user_text,
             history,
@@ -119,6 +135,17 @@ class Client:
             verbose=False,
             on_token=on_token,
             on_status=on_status,
+            gen=gen,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed,
+            num_predict=num_predict,
+            repeat_penalty=repeat_penalty,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            stop=stop,
+            keep_alive=keep_alive,
         )
 
     def get_settings(self) -> dict[str, Any]:
@@ -196,6 +223,7 @@ class Client:
 
 __all__ = [
     "Client",
+    "GenOptions",
     "OrchestraResult",
     "RouteDecision",
     "Tier",

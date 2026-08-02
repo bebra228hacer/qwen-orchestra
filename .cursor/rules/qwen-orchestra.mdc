@@ -52,5 +52,6 @@ Local time: tiny `need_local_time` (без regex; любое упоминани�
 - `start.bat` — CP866 без BOM + `cd /d "%~dp0"`
 - После правок лаунчера пересобрать `QwenChat.exe` (см. AGENTS.md)
 - Документацию держать в синхроне: `README.md` (обзор), `SETUP.md` (установка), `AGENTS.md`, `docs/SDK.md` (встраивание в другие проекты), этот файл
-- Публичный контракт для чужих ботов/агентов — только `docs/SDK.md` + `qwen_orchestra.Client`
+- Публичный контракт для чужих ботов/агентов — только `docs/SDK.md` + `qwen_orchestra.Client` / `GenOptions`
+- Сэмплинг воркера — через `Client.ask(temperature=…, gen=…)` (не хардкодить в orchestra); роутер/selfcheck остаются temperature=0
 - Ответы пользователю — на русском

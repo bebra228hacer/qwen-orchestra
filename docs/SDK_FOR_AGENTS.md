@@ -8,9 +8,15 @@
 Локальный оркестр LLM: Ollama + опционально OpenRouter. Встраивание **in-process** через `Client`, не через HTTP UI.
 
 ```python
-from qwen_orchestra import Client
+from qwen_orchestra import Client, GenOptions
+
 client = Client(settings_path="…/orchestra_settings.json")
-result = client.ask("…", history=[…])  # history БЕЗ текущего user
+result = client.ask(
+    "…",
+    history=[…],  # БЕЗ текущего user
+    temperature=0.2,  # или gen=GenOptions(temperature=0.2, seed=42, num_predict=512)
+)
+# result.gen — фактически применённые опции воркера
 ```
 
 ## Must
@@ -18,7 +24,8 @@ result = client.ask("…", history=[…])  # history БЕЗ текущего use
 - Установка: `pip install -e <путь-к-клону-qwen-orchestra>` (ядро без `[web]`).
 - Всегда задавай **свой** `settings_path` (не общий конфиг оркестра).
 - Перед работой: `client.ready()` (Ollama) и `client.health()["ok"]`.
-- Роутер и selfcheck — **локальные** Ollama; OpenRouter только как воркер в пуле.
+- Роутер и selfcheck — **локальные** Ollama (всегда `temperature=0`); OpenRouter только как воркер.
+- Сэмплинг воркера — через `ask(temperature=…)`, `top_p`, `seed`, `num_predict`, `stop`, `keep_alive` или `gen=GenOptions(...)`. **Не** патчить `orchestra.py`.
 - `force_model` = **id записи пула** (`ollama:…` / `openrouter:…`), не сырой tag.
 - Стрим: `on_token` / `on_status`; на `retry`/`restore` сбрасывай показанный текст.
 - Ключ OR: `OPENROUTER_API_KEY` или `client.set_openrouter_api_key`; не в git.
@@ -34,10 +41,15 @@ result = client.ask("…", history=[…])  # history БЕЗ текущего use
 
 `ready` · `health` · `route` · `ask` · `get_settings` · `update_settings` · `reset_settings` · `add_model` · `delete_model` · `set_openrouter_api_key`
 
-`OrchestraResult`: `text`, `tier`, `model`, `attempts`, `checked`, `problems`, `need_web`, `need_local_time`, …
+`ask` сэмплинг: `gen` / `temperature` / `top_p` / `top_k` / `seed` / `num_predict` / `repeat_penalty` / `presence_penalty` / `frequency_penalty` / `stop` / `keep_alive`
+
+`OrchestraResult`: `text`, `tier`, `model`, `gen`, `attempts`, `checked`, `problems`, `need_web`, `need_local_time`, …
+
+Defaults воркера: `temperature=0.3`, `keep_alive="10m"`.
 
 ## Не делай
 
 - Не обещай OpenAI-compatible HTTP API.
 - Не считай, что история всегда попадает в heavy/coder (там фильтр по отсылкам).
 - Не коммить `secrets.json` / API-ключи.
+- Не обходи `Client.ask` ради температуры — она уже в SDK.

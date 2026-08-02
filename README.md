@@ -16,7 +16,7 @@
 - **Локальное время ПК** — tiny решает, нужен ли вопрос про часы/дату; при «да» подставляются часы/TZ с машины.
 - **Веб-UI** — чаты, Markdown/код/формулы, чипы статуса, «Модели и промпты», монитор CPU/RAM/GPU/Ollama.
 - **OpenRouter** — внешняя модель в пуле (с тиром или только вручную; ключ в env / `secrets.json`); tools пока только на Ollama.
-- **Python SDK** — `from qwen_orchestra import Client` (ask / route / health / settings in-process).
+- **Python SDK** — `from qwen_orchestra import Client, GenOptions` (ask / route / health / settings / сэмплинг воркера in-process).
 - **CLI** — интерактивный оркестр и one-shot; лаунчер с автозапуском Ollama при необходимости.
 
 Defaults: `0.8b` · `nano` · `2b` · `4b` · `7b` · `9b` · `14b` · `coder` · `ultra` · `frontier`. Модель без тира — только ручной выбор.
@@ -44,7 +44,7 @@ user → route → plan context → worker (± web / ± время ПК) → sel
 | Рендер чата | marked, DOMPurify, highlight.js, KaTeX (`web/vendor/`) |
 | Лаунчер | `open_web.py` → опционально `QwenChat.exe` (PyInstaller) |
 
-Публичный вход для приложений: `qwen_orchestra.Client`. Слоты и промпты роутера — `settings.json` / UI.
+Публичный вход для приложений: `qwen_orchestra.Client` (+ `GenOptions` для temperature/top_p/seed/…). Слоты и промпты роутера — `settings.json` / UI.
 
 ---
 

@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from . import selfcheck
 from . import settings as app_settings
-from .llm import chat, chat_stream, installed_models
+from .llm import GenOptions, chat, chat_stream, installed_models, merge_gen, worker_gen
 from .router import ALL_TIERS, TIER_ORDER, TIER_RANK, RouteDecision, Tier, need_local_time, need_web, route
 from .selfcheck import Verdict
 from .tools_local import TOOL_IMPL_LOCAL, TOOLS_LOCAL, local_context_block
@@ -220,6 +220,7 @@ class OrchestraResult:
     used_history: bool = True
     context_reason: str = ""
     need_local_time: bool = False
+    gen: GenOptions | None = None  # фактически применённые опции воркера
 
 
 def _provider_of(tier: str, providers: dict[str, str] | None = None) -> str:
@@ -576,7 +577,9 @@ def _worker_with_tools(
     tool_cache: dict[str, str] | None = None,
     provider: str = "ollama",
     local_context: str | None = None,
+    gen: GenOptions | None = None,
 ) -> str:
+    g = worker_gen(gen)
     if provider != "ollama":
         # MVP: tools только через Ollama
         return _worker_plain(
@@ -589,6 +592,7 @@ def _worker_with_tools(
             num_ctx=num_ctx,
             provider=provider,
             local_context=local_context,
+            gen=g,
         )
     messages = _build_messages(
         user_text, history, retry_hint, local_context=local_context
@@ -613,9 +617,8 @@ def _worker_with_tools(
             model,
             messages,
             tools=_ALL_TOOLS,
-            temperature=0.3,
+            gen=g,
             num_ctx=num_ctx,
-            keep_alive="10m",
             provider=provider,
         )
         content = (msg.get("content") or "").strip()
@@ -667,9 +670,7 @@ def _worker_with_tools(
             calls_done += 1
             tool_budget = max(400, tool_budget - len(result))
 
-    msg = chat(
-        model, messages, temperature=0.3, num_ctx=num_ctx, keep_alive="10m", provider=provider
-    )
+    msg = chat(model, messages, gen=g, num_ctx=num_ctx, provider=provider)
     return (msg.get("content") or "").strip() or "(пустой ответ)"
 
 
@@ -684,7 +685,9 @@ def _worker_plain(
     num_ctx: int = NUM_CTX_FULL,
     provider: str = "ollama",
     local_context: str | None = None,
+    gen: GenOptions | None = None,
 ) -> str:
+    g = worker_gen(gen)
     messages = _build_messages(
         user_text, history, retry_hint, local_context=local_context
     )
@@ -694,15 +697,12 @@ def _worker_plain(
             model,
             messages,
             on_token=on_token,
-            temperature=0.3,
+            gen=g,
             num_ctx=num_ctx,
-            keep_alive="10m",
             provider=provider,
         )
 
-    msg = chat(
-        model, messages, temperature=0.3, num_ctx=num_ctx, keep_alive="10m", provider=provider
-    )
+    msg = chat(model, messages, gen=g, num_ctx=num_ctx, provider=provider)
     return (msg.get("content") or "").strip() or "(пустой ответ)"
 
 
@@ -783,9 +783,35 @@ def handle(
     verbose: bool = True,
     on_token: TokenCallback | None = None,
     on_status: StatusCallback | None = None,
+    gen: GenOptions | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    seed: int | None = None,
+    num_predict: int | None = None,
+    repeat_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    frequency_penalty: float | None = None,
+    stop: list[str] | tuple[str, ...] | str | None = None,
+    keep_alive: str | None = None,
 ) -> OrchestraResult:
     history = history or []
     app_settings.ensure_bootstrapped()
+    effective_gen = worker_gen(
+        merge_gen(
+            gen,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            seed=seed,
+            num_predict=num_predict,
+            repeat_penalty=repeat_penalty,
+            presence_penalty=presence_penalty,
+            frequency_penalty=frequency_penalty,
+            stop=stop,
+            keep_alive=keep_alive,
+        )
+    )
     if (
         history
         and history[-1].get("role") == "user"
@@ -938,6 +964,7 @@ def handle(
             route_reason=decision.reason,
             checked=False,
             need_local_time=False,
+            gen=effective_gen,
         )
 
     start_tier: Tier = decision.tier
@@ -988,6 +1015,7 @@ def handle(
                 checked=verdict.checked,
                 problems=list(verdict.problems),
                 need_local_time=decision.need_local_time,
+                gen=effective_gen,
             )
         mid = _fit_tier("mid", available)
         mid_entry = _resolve_entry(mid)
@@ -1073,6 +1101,7 @@ def handle(
                 tool_cache=tool_cache,
                 provider=provider,
                 local_context=local_ctx,
+                gen=effective_gen,
             )
             _emit_token(on_token, text)
         else:
@@ -1086,6 +1115,7 @@ def handle(
                 num_ctx=ctx_plan.num_ctx,
                 provider=provider,
                 local_context=local_ctx,
+                gen=effective_gen,
             )
 
         review_model = _local_review_model(
@@ -1159,4 +1189,5 @@ def handle(
         used_history=best.ctx.use_history,
         context_reason=best.ctx.reason,
         need_local_time=decision.need_local_time,
+        gen=effective_gen,
     )

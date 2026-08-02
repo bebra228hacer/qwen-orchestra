@@ -104,13 +104,14 @@ python chat_web.py
 Шпаргалка в чужой репо: [docs/SDK_FOR_AGENTS.md](docs/SDK_FOR_AGENTS.md).
 
 ```python
-from qwen_orchestra import Client
+from qwen_orchestra import Client, GenOptions
 
 client = Client()  # ollama_host=..., settings_path=... (изолируй путь в боте!)
 print(client.health())
 print(client.route("напиши функцию сортировки"))
-result = client.ask("2+2")
-print(result.text, result.tier, result.model)
+result = client.ask("2+2", temperature=0.1)
+# result = client.ask("…", gen=GenOptions(temperature=0.2, seed=42, num_predict=256))
+print(result.text, result.tier, result.model, result.gen)
 ```
 
 Примеры: `examples/ask_sdk.py`, `examples/ask_sdk_bot.py` (Ollama + OpenRouter).  

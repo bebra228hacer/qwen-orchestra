@@ -18,6 +18,8 @@ from pathlib import Path
 
 from qwen_orchestra import Client
 
+# Полный гайд: docs/SDK.md — GenOptions / temperature / seed / num_predict …
+
 
 def build_client(settings_path: Path) -> Client:
     client = Client(settings_path=settings_path)
@@ -76,13 +78,15 @@ def main() -> None:
         question,
         history=history,
         force_model=args.force_model,
+        temperature=0.2,
+        # gen=GenOptions(temperature=0.2, seed=42, num_predict=512),
         on_token=on_token,
         on_status=on_status,
     )
     print()
     print(
         f"→ model={result.model} tier={result.tier} "
-        f"attempts={result.attempts} checked={result.checked}"
+        f"attempts={result.attempts} checked={result.checked} gen={result.gen}"
     )
 
     # Как хранить историю в боте:

@@ -1,12 +1,17 @@
 """Клиент LLM: Ollama (локально) + OpenRouter (OpenAI-compatible).
 
-`num_ctx` передаётся в `options` Ollama; для OpenRouter — эвристика `max_tokens`.
+`num_ctx` передаётся в `options` Ollama; для OpenRouter — эвристика `max_tokens`
+(или явный `GenOptions.num_predict`).
+
 Размер окна подбирает оркестр (`plan_worker_context`), не этот модуль.
 
 Для Qwen3/3.5 в Ollama-payload уходит top-level `think: false` — иначе модель
 тратит токены на reasoning и ломает JSON-роутер / tool_calls.
 
 OpenRouter (MVP): chat / stream без tools; ключ — env или secrets.json.
+
+Сэмплинг для воркера — публичный `GenOptions` (через `Client.ask` / `handle`).
+Роутер и selfcheck по-прежнему вызывают `chat(..., temperature=0.0)` напрямую.
 """
 
 from __future__ import annotations
@@ -14,14 +19,100 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable
 
 DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+DEFAULT_WORKER_TEMPERATURE = 0.3
+DEFAULT_WORKER_KEEP_ALIVE = "10m"
 
 _ollama_host = DEFAULT_OLLAMA_HOST
 OLLAMA_CHAT_URL = f"{DEFAULT_OLLAMA_HOST}/api/chat"
 OLLAMA_TAGS_URL = f"{DEFAULT_OLLAMA_HOST}/api/tags"
+
+
+@dataclass(frozen=True)
+class GenOptions:
+    """Параметры генерации воркера (Ollama options / OpenRouter chat).
+
+    ``None`` = не трогать / взять default оркестра.
+    Роутер и selfcheck GenOptions не используют (там всегда temperature=0).
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    seed: int | None = None
+    num_predict: int | None = None  # max tokens ответа; OR → max_tokens
+    repeat_penalty: float | None = None  # Ollama
+    presence_penalty: float | None = None  # OpenRouter / OpenAI-совместимые
+    frequency_penalty: float | None = None
+    stop: tuple[str, ...] | None = None
+    keep_alive: str | None = None  # только Ollama, напр. "10m" / "0"
+
+    def to_dict(self, *, skip_none: bool = True) -> dict[str, Any]:
+        raw = asdict(self)
+        if self.stop is not None:
+            raw["stop"] = list(self.stop)
+        if skip_none:
+            return {k: v for k, v in raw.items() if v is not None}
+        return raw
+
+
+def _as_stop(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return (s,) if s else None
+    seq = tuple(str(x) for x in value if str(x))
+    return seq or None
+
+
+def merge_gen(
+    base: GenOptions | None = None,
+    *,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    seed: int | None = None,
+    num_predict: int | None = None,
+    repeat_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    frequency_penalty: float | None = None,
+    stop: list[str] | tuple[str, ...] | str | None = None,
+    keep_alive: str | None = None,
+) -> GenOptions:
+    """Склеить GenOptions с плоскими override (не-None побеждают)."""
+    g = base or GenOptions()
+    updates: dict[str, Any] = {}
+    for name, val in (
+        ("temperature", temperature),
+        ("top_p", top_p),
+        ("top_k", top_k),
+        ("seed", seed),
+        ("num_predict", num_predict),
+        ("repeat_penalty", repeat_penalty),
+        ("presence_penalty", presence_penalty),
+        ("frequency_penalty", frequency_penalty),
+        ("keep_alive", keep_alive),
+    ):
+        if val is not None:
+            updates[name] = val
+    if stop is not None:
+        updates["stop"] = _as_stop(stop)
+    return replace(g, **updates) if updates else g
+
+
+def worker_gen(gen: GenOptions | None = None) -> GenOptions:
+    """Defaults воркера: temperature=0.3, keep_alive=10m."""
+    g = gen or GenOptions()
+    if g.temperature is None:
+        g = replace(g, temperature=DEFAULT_WORKER_TEMPERATURE)
+    if g.keep_alive is None:
+        g = replace(g, keep_alive=DEFAULT_WORKER_KEEP_ALIVE)
+    return g
 
 
 def get_ollama_host() -> str:
@@ -57,6 +148,25 @@ def _think_default(model: str) -> bool | None:
     return None
 
 
+def _ollama_options(num_ctx: int, gen: GenOptions) -> dict[str, Any]:
+    opts: dict[str, Any] = {"num_ctx": num_ctx}
+    if gen.temperature is not None:
+        opts["temperature"] = float(gen.temperature)
+    if gen.top_p is not None:
+        opts["top_p"] = float(gen.top_p)
+    if gen.top_k is not None:
+        opts["top_k"] = int(gen.top_k)
+    if gen.seed is not None:
+        opts["seed"] = int(gen.seed)
+    if gen.num_predict is not None:
+        opts["num_predict"] = int(gen.num_predict)
+    if gen.repeat_penalty is not None:
+        opts["repeat_penalty"] = float(gen.repeat_penalty)
+    if gen.stop:
+        opts["stop"] = list(gen.stop)
+    return opts
+
+
 def _payload(
     model: str,
     messages: list[dict],
@@ -64,23 +174,22 @@ def _payload(
     tools: list | None,
     fmt: Any,
     stream: bool,
-    temperature: float,
     num_ctx: int,
-    keep_alive: str | None,
+    gen: GenOptions,
     think: bool | None,
 ) -> dict:
     payload: dict = {
         "model": model,
         "messages": messages,
         "stream": stream,
-        "options": {"temperature": temperature, "num_ctx": num_ctx},
+        "options": _ollama_options(num_ctx, gen),
     }
     if tools:
         payload["tools"] = tools
     if fmt is not None:
         payload["format"] = fmt
-    if keep_alive:
-        payload["keep_alive"] = keep_alive
+    if gen.keep_alive:
+        payload["keep_alive"] = gen.keep_alive
     # top-level (не в options): иначе Ollama игнорирует think
     resolved = _think_default(model) if think is None else think
     if resolved is not None:
@@ -133,22 +242,61 @@ def _max_tokens_from_ctx(num_ctx: int) -> int:
     return max(256, min(4096, int(num_ctx) // 2 if num_ctx else 1024))
 
 
+def _openrouter_body(
+    model: str,
+    messages: list[dict],
+    *,
+    num_ctx: int,
+    gen: GenOptions,
+    stream: bool,
+) -> dict[str, Any]:
+    temp = (
+        float(gen.temperature)
+        if gen.temperature is not None
+        else DEFAULT_WORKER_TEMPERATURE
+    )
+    max_tokens = (
+        int(gen.num_predict)
+        if gen.num_predict is not None
+        else _max_tokens_from_ctx(num_ctx)
+    )
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": _openai_messages(messages),
+        "temperature": temp,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    if gen.top_p is not None:
+        payload["top_p"] = float(gen.top_p)
+    if gen.seed is not None:
+        payload["seed"] = int(gen.seed)
+    if gen.presence_penalty is not None:
+        payload["presence_penalty"] = float(gen.presence_penalty)
+    if gen.frequency_penalty is not None:
+        payload["frequency_penalty"] = float(gen.frequency_penalty)
+    if gen.stop:
+        payload["stop"] = list(gen.stop)
+    # top_k / repeat_penalty — не стандарт OpenAI; некоторые провайдеры OR игнорят
+    if gen.top_k is not None:
+        payload["top_k"] = int(gen.top_k)
+    if gen.repeat_penalty is not None:
+        payload["repetition_penalty"] = float(gen.repeat_penalty)
+    return payload
+
+
 def _openrouter_chat(
     model: str,
     messages: list[dict],
     *,
-    temperature: float,
     num_ctx: int,
+    gen: GenOptions,
     timeout: int,
 ) -> dict:
     api_key, base = _openrouter_key_and_base()
-    payload = {
-        "model": model,
-        "messages": _openai_messages(messages),
-        "temperature": temperature,
-        "max_tokens": _max_tokens_from_ctx(num_ctx),
-        "stream": False,
-    }
+    payload = _openrouter_body(
+        model, messages, num_ctx=num_ctx, gen=gen, stream=False
+    )
     req = urllib.request.Request(
         f"{base}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -181,18 +329,14 @@ def _openrouter_chat_stream(
     messages: list[dict],
     *,
     on_token: Callable[[str], None] | None,
-    temperature: float,
     num_ctx: int,
+    gen: GenOptions,
     timeout: int,
 ) -> str:
     api_key, base = _openrouter_key_and_base()
-    payload = {
-        "model": model,
-        "messages": _openai_messages(messages),
-        "temperature": temperature,
-        "max_tokens": _max_tokens_from_ctx(num_ctx),
-        "stream": True,
-    }
+    payload = _openrouter_body(
+        model, messages, num_ctx=num_ctx, gen=gen, stream=True
+    )
     req = urllib.request.Request(
         f"{base}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -232,13 +376,26 @@ def _openrouter_chat_stream(
     return "".join(parts)
 
 
+def _resolve_call_gen(
+    *,
+    temperature: float | None,
+    gen: GenOptions | None,
+    default_temperature: float | None,
+) -> GenOptions:
+    g = merge_gen(gen, temperature=temperature)
+    if g.temperature is None and default_temperature is not None:
+        g = replace(g, temperature=default_temperature)
+    return g
+
+
 def chat(
     model: str,
     messages: list[dict],
     *,
     tools: list | None = None,
     fmt: Any = None,
-    temperature: float = 0.3,
+    temperature: float | None = None,
+    gen: GenOptions | None = None,
     num_ctx: int = 8192,
     keep_alive: str | None = None,
     think: bool | None = None,
@@ -246,6 +403,11 @@ def chat(
     provider: str = "ollama",
 ) -> dict:
     """Один запрос без стриминга. Возвращает объект message целиком."""
+    g = _resolve_call_gen(
+        temperature=temperature,
+        gen=merge_gen(gen, keep_alive=keep_alive),
+        default_temperature=DEFAULT_WORKER_TEMPERATURE,
+    )
     prov = _normalize_provider(provider)
     if prov == "openrouter":
         if tools:
@@ -253,8 +415,8 @@ def chat(
         return _openrouter_chat(
             model,
             messages,
-            temperature=temperature,
             num_ctx=num_ctx,
+            gen=g,
             timeout=timeout,
         )
     payload = _payload(
@@ -263,9 +425,8 @@ def chat(
         tools=tools,
         fmt=fmt,
         stream=False,
-        temperature=temperature,
         num_ctx=num_ctx,
-        keep_alive=keep_alive,
+        gen=g,
         think=think,
     )
     with _request(payload, timeout) as resp:
@@ -280,7 +441,8 @@ def chat_stream(
     messages: list[dict],
     *,
     on_token: Callable[[str], None] | None = None,
-    temperature: float = 0.3,
+    temperature: float | None = None,
+    gen: GenOptions | None = None,
     num_ctx: int = 8192,
     keep_alive: str | None = None,
     think: bool | None = None,
@@ -288,14 +450,19 @@ def chat_stream(
     provider: str = "ollama",
 ) -> str:
     """Потоковый ответ. Токены отдаются в on_token, полный текст возвращается."""
+    g = _resolve_call_gen(
+        temperature=temperature,
+        gen=merge_gen(gen, keep_alive=keep_alive),
+        default_temperature=DEFAULT_WORKER_TEMPERATURE,
+    )
     prov = _normalize_provider(provider)
     if prov == "openrouter":
         return _openrouter_chat_stream(
             model,
             messages,
             on_token=on_token,
-            temperature=temperature,
             num_ctx=num_ctx,
+            gen=g,
             timeout=timeout,
         )
     payload = _payload(
@@ -304,9 +471,8 @@ def chat_stream(
         tools=None,
         fmt=None,
         stream=True,
-        temperature=temperature,
         num_ctx=num_ctx,
-        keep_alive=keep_alive,
+        gen=g,
         think=think,
     )
     parts: list[str] = []

@@ -68,10 +68,13 @@ from qwen_orchestra import Client
 client = Client()                      # или ollama_host=..., settings_path=...
 client.ready() / client.health()
 client.route(text)                     # RouteDecision
-client.ask(text, history=..., on_token=...)  # OrchestraResult, verbose=False
+client.ask(text, history=..., on_token=..., temperature=0.2)
+# или: client.ask(..., gen=GenOptions(temperature=0.2, seed=42, num_predict=512))
 client.get_settings() / update_settings(...) / add_model(...) / delete_model(...)
 client.set_openrouter_api_key(...)  # secrets.json; None — очистить
 ```
+
+`GenOptions` и плоские kwargs `ask` влияют **только на воркер** (default `temperature=0.3`, `keep_alive="10m"`). Роутер и selfcheck всегда `temperature=0`.
 
 `settings.json`: в корне репо при разработке; иначе `%LOCALAPPDATA%/qwen-orchestra/` (Windows) или `~/.config/qwen-orchestra/`.
 Ключ OpenRouter — env `OPENROUTER_API_KEY` или `secrets.json` рядом (не в git).
@@ -107,7 +110,7 @@ user → route → plan context → worker (± web tools) → selfcheck
 - Для веба/SSE **не** печатать в stdout: `verbose=False` + колбэки.
 - События `on_status`: `route`, `context`, `worker`, `tool`, `selfcheck`, `retry`, `restore`.
 - `force_model` — id записи пула; `force_tier` — лучшая available-модель тира (compat).
-- `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `need_local_time`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason` (метаданные — от **выбранной** попытки).
+- `OrchestraResult`: `text`, `tier`, `model`, `need_web`, `need_local_time`, `route_reason`, `escalated`, `attempts`, `checked`, `problems`, `num_ctx`, `used_history`, `context_reason`, `gen` (метаданные — от **выбранной** попытки; `gen` — применённый сэмплинг воркера).
 
 ## Auto-режим: когда какая модель
 

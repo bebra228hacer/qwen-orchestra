@@ -3,7 +3,7 @@
 Документ для **встраивания** `qwen_orchestra` в другой Python-проект (бот, CLI, сервис).  
 Карта исходников самого репозитория — [AGENTS.md](../AGENTS.md). Установка окружения — [SETUP.md](../SETUP.md).
 
-**Версия пакета:** `0.1.0` · **Python:** ≥ 3.10 · **Публичный вход:** `from qwen_orchestra import Client`
+**Версия пакета:** `0.1.1` · **Python:** ≥ 3.10 · **Публичный вход:** `from qwen_orchestra import Client, GenOptions`
 
 ---
 
@@ -25,7 +25,7 @@ ask() → route → plan_worker_context → worker (± web / ± время ПК)
 ### Минимальный сценарий
 
 ```python
-from qwen_orchestra import Client
+from qwen_orchestra import Client, GenOptions
 
 client = Client(settings_path="path/to/my_bot/settings.json")  # изолируй конфиг!
 if not client.ready():
@@ -34,9 +34,10 @@ h = client.health()
 if not h["ok"]:
     raise SystemExit(f"Нет доступных моделей пула: {h['missing']}")
 
-result = client.ask("привет")
-print(result.text)          # ответ
-print(result.model, result.tier)  # какая модель / тир сработали
+result = client.ask("привет", temperature=0.2)
+# или: client.ask("…", gen=GenOptions(temperature=0.2, seed=42, num_predict=512))
+print(result.text)
+print(result.model, result.tier, result.gen)
 ```
 
 ### Обязательные правила интеграции
@@ -62,6 +63,7 @@ print(result.model, result.tier)  # какая модель / тир срабо�
 | Всегда одна модель | `force_model="openrouter:…"` / `"ollama:…"` (id из пула) |
 | Auto по сложности | записи пула **с** `tier` + `rank`; `ask()` без force |
 | Стрим в Telegram/Discord | `on_token=lambda t: …` |
+| Температура / seed / лимит токенов | `ask(..., temperature=0.2)` или `gen=GenOptions(...)` |
 | Отладка выбора тира | `client.route(text)` до `ask` |
 
 ---
@@ -136,10 +138,12 @@ print(client.settings_path)
 ```python
 from qwen_orchestra import (
     Client,
+    GenOptions,       # сэмплинг воркера
     OrchestraResult,  # результат ask
     RouteDecision,    # результат route
     Tier,             # alias str: "tiny"|"mid"|…
     Verdict,          # тип selfcheck (редко нужен снаружи)
+    merge_gen,        # склеить GenOptions + overrides
 )
 ```
 
@@ -202,6 +206,20 @@ class RouteDecision:
 | `stream` | `True` | стрим токенов в `on_token` |
 | `on_token` | `None` | `Callable[[str], None]` — куски текста |
 | `on_status` | `None` | `Callable[[str, dict], None]` — фазы оркестра |
+| `gen` | `None` | `GenOptions` — пакет сэмплинга воркера |
+| `temperature` | `None` | override; default воркера **0.3** |
+| `top_p` | `None` | nucleus sampling |
+| `top_k` | `None` | top-k (Ollama; на OR может игнорироваться) |
+| `seed` | `None` | воспроизводимость (если бэкенд поддерживает) |
+| `num_predict` | `None` | макс. токенов ответа (Ollama `num_predict` / OR `max_tokens`) |
+| `repeat_penalty` | `None` | Ollama; на OR → `repetition_penalty` |
+| `presence_penalty` | `None` | OpenRouter / OpenAI-совместимые |
+| `frequency_penalty` | `None` | OpenRouter / OpenAI-совместимые |
+| `stop` | `None` | стоп-последовательности (`str` / `list[str]`) |
+| `keep_alive` | `None` | Ollama; default **`"10m"`** (`"0"` — выгрузить сразу) |
+
+Плоские kwargs и поля `gen` **мержатся**: не-`None` плоский параметр побеждает.  
+Роутер и selfcheck **всегда** `temperature=0` — `GenOptions` на них не влияет.
 
 ```python
 @dataclass
@@ -219,9 +237,62 @@ class OrchestraResult:
     used_history: bool = True
     context_reason: str = ""
     need_local_time: bool = False
+    gen: GenOptions | None     # фактически применённые опции воркера
 ```
 
 Метаданные относятся к **выбранной** (лучшей/успешной) попытке.
+
+---
+
+## 3.1. Сэмплинг: `GenOptions`
+
+```python
+from qwen_orchestra import GenOptions
+
+client.ask("Напиши короткий слоган", temperature=0.8)
+
+client.ask(
+    "Ответь одним словом: да или нет",
+    gen=GenOptions(
+        temperature=0.0,
+        seed=42,
+        num_predict=16,
+        stop=["\n"],
+    ),
+)
+
+# Детерминированный код / JSON-подобный стиль
+client.ask(prompt, temperature=0.1, top_p=0.9, seed=7)
+
+# Короткий ответ + сразу освободить VRAM (Ollama)
+client.ask(prompt, num_predict=256, keep_alive="0")
+```
+
+| Поле | Ollama | OpenRouter | Зачем боту |
+|------|--------|------------|------------|
+| `temperature` | `options.temperature` | `temperature` | креатив vs стабильность |
+| `top_p` | ✓ | ✓ | альтернатива/дополнение к temperature |
+| `top_k` | ✓ | best-effort | жёстче ограничить хвост распределения |
+| `seed` | ✓ | ✓ (если провайдер умеет) | воспроизводимые тесты / A-B |
+| `num_predict` | `num_predict` | `max_tokens` | лимит длины ответа (стоимость/латентность) |
+| `repeat_penalty` | ✓ | `repetition_penalty` | меньше зацикливаний |
+| `presence_penalty` | — | ✓ | поощрять новые темы |
+| `frequency_penalty` | — | ✓ | реже повторять те же токены |
+| `stop` | ✓ | ✓ | обрезать на маркере / запретить уход в чат |
+| `keep_alive` | top-level | — | держать/снять модель из VRAM |
+
+Defaults воркера, если ничего не задано: `temperature=0.3`, `keep_alive="10m"`.
+
+Рекомендации:
+
+| Задача | Старт |
+|--------|--------|
+| FAQ / факты / код | `temperature=0.1…0.3`, опционально `seed` |
+| Ролевая / креатив | `temperature=0.7…1.0`, `top_p≈0.9` |
+| Жёсткий формат (одно слово, JSON-ish) | `temperature=0`, `num_predict` маленький, `stop` |
+| Экономия OR | `num_predict` потолок под ваш UX |
+
+`result.gen` — снимок применённых опций (удобно логировать в боте).
 
 ### Настройки пула
 
@@ -414,7 +485,7 @@ def reply(text: str, history: list[dict] | None = None) -> str:
     return client.ask(text, history=history).text
 ```
 
-### B. Ручной выбор «локально / облако»
+### B. Ручной выбор «локально / облако» + температура из конфига бота
 
 ```python
 FORCE = {
@@ -422,10 +493,11 @@ FORCE = {
     "cloud": "openrouter:anthropic/claude-sonnet-4",
 }
 
-def reply(text: str, mode: str = "auto") -> OrchestraResult:
+def reply(text: str, mode: str = "auto", *, temperature: float = 0.3) -> OrchestraResult:
+    kw = {"temperature": temperature}
     if mode == "auto":
-        return client.ask(text)
-    return client.ask(text, force_model=FORCE[mode])
+        return client.ask(text, **kw)
+    return client.ask(text, force_model=FORCE[mode], **kw)
 ```
 
 Сначала убедись, что id есть в `client.get_settings()["models"]`.
@@ -507,6 +579,7 @@ def assert_orchestra_ready(client: Client) -> None:
 [ ] (опц.) OPENROUTER_API_KEY / set_openrouter_api_key
 [ ] (опц.) add_model для OR / своих ollama-тегов
 [ ] ask() с history без текущего сообщения
+[ ] temperature / GenOptions под задачу бота (не патчить orchestra.py)
 [ ] force_model = id из pool, не сырое имя (если ручной режим)
 [ ] on_token/on_status при стриме; сброс текста на retry
 [ ] ключи не в git (secrets.json / env)

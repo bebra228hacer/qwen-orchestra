@@ -18,8 +18,8 @@ def main() -> None:
     print("health ok:", client.health().get("ok"))
     decision = client.route("привет")
     print(f"route: tier={decision.tier} reason={decision.reason!r}")
-    result = client.ask("2+2")
-    print(f"ask: {result.text!r} (model={result.model}, tier={result.tier})")
+    result = client.ask("2+2", temperature=0.0)
+    print(f"ask: {result.text!r} (model={result.model}, tier={result.tier}, gen={result.gen})")
 
 
 if __name__ == "__main__":
