@@ -188,9 +188,14 @@ def health() -> dict[str, Any]:
             )
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
+        have = set()
+        missing = missing_models(have)
+        missing_optional = missing_optional_models(have)
+        router_missing = True
     or_status = app_settings.openrouter_status()
     return {
-        "ok": ollama_ok and not missing,
+        # ok = есть ≥1 доступный тир (локальный или OpenRouter), даже если Ollama лежит
+        "ok": not missing,
         "ollama": ollama_ok,
         "models": models,
         "missing": missing,

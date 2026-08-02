@@ -223,8 +223,8 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "model": "qwen3.5:0.8b",
         "label": "tiny · 3.5 0.8b",
         "router_prompt": DEFAULT_ROUTER_PROMPTS["tiny"],
-        "required": True,
-        "optional": False,
+        "required": False,
+        "optional": True,
         "rank": 0,
         "router_auto": True,
         "builtin": True,
@@ -259,8 +259,8 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "model": "qwen3.5:4b",
         "label": "mid · 3.5 4b",
         "router_prompt": DEFAULT_ROUTER_PROMPTS["mid"],
-        "required": True,
-        "optional": False,
+        "required": False,
+        "optional": True,
         "rank": 3,
         "router_auto": True,
         "builtin": True,
@@ -283,8 +283,8 @@ DEFAULT_SLOTS: list[dict[str, Any]] = [
         "model": "qwen3.5:9b",
         "label": "heavy · 3.5 9b",
         "router_prompt": DEFAULT_ROUTER_PROMPTS["heavy"],
-        "required": True,
-        "optional": False,
+        "required": False,
+        "optional": True,
         "rank": 5,
         "router_auto": True,
         "builtin": True,
@@ -616,7 +616,7 @@ def optional_ids(settings: AppSettings | None = None) -> tuple[str, ...]:
 def tier_order(settings: AppSettings | None = None) -> list[str]:
     """Лестница эскалации: уникальные id по возрастанию rank (без дублей ранга — стабильный порядок)."""
     slots = sorted((settings or get_settings()).slots, key=lambda s: (s.rank, s.id))
-    # coder/xlarge оба rank=3 — в order оставляем xlarge как «вверх», coder — боковая ветка
+    # coder — боковая ветка: в лестнице эскалации его нет (см. _next_tier)
     order: list[str] = []
     for s in slots:
         if s.id == "coder":
@@ -772,13 +772,16 @@ def update_settings(
 
 
 def delete_slot(slot_id: str) -> AppSettings:
+    """Сбросить тир к defaults (модель/провайдер/промпт/rank)."""
     sid = slot_id.strip().lower()
-    if sid in FIXED_TIERS:
-        raise ValueError(
-            f"Тир {sid} фиксированный — удалить нельзя. "
-            "Смените модель или сбросьте настройки."
-        )
-    raise KeyError(slot_id)
+    if sid not in FIXED_TIERS:
+        raise KeyError(slot_id)
+    default = next(d for d in DEFAULT_SLOTS if d["id"] == sid)
+    s = get_settings()
+    s.slots = [
+        _slot_from_dict(default) if x.id == sid else x for x in s.slots
+    ]
+    return save_settings(s)
 
 
 def apply_to_runtime(settings: AppSettings | None = None) -> None:
@@ -792,14 +795,37 @@ def apply_to_runtime(settings: AppSettings | None = None) -> None:
     ranks = tier_rank(s)
     order = tier_order(s)
     required = required_ids(s)
-    optional = optional_ids(s)
-    selfcheck = models.get("mid") or next(iter(models.values()), "")
+    optional = optional_ids(s) or tuple(models.keys())
+    # Selfcheck — только локальные модели (предпочтительно mid)
+    selfcheck = next(
+        (
+            models[tid]
+            for tid in ("mid", "large", "small", "heavy", "nano", "tiny")
+            if models.get(tid) and providers.get(tid, "ollama") == "ollama"
+        ),
+        next(
+            (
+                models[tid]
+                for tid in models
+                if providers.get(tid, "ollama") == "ollama" and models.get(tid)
+            ),
+            "",
+        ),
+    )
     heavy_rank = ranks.get("heavy", 2)
     complex_tiers = frozenset(
-        tid for tid, r in ranks.items() if r >= heavy_rank or tid in {"heavy", "xlarge", "coder"}
+        tid for tid, r in ranks.items() if r >= heavy_rank or tid in {"heavy", "xlarge", "coder", "ultra", "frontier"}
     )
     route_model = s.router_model or models.get("tiny") or router.ROUTE_MODEL
-    revalidate = models.get("mid") or router.REVALIDATE_MODEL
+    # REVALIDATE тоже локальный mid, иначе тот же route_model
+    revalidate = next(
+        (
+            models[tid]
+            for tid in ("mid", "large", "small", "heavy")
+            if models.get(tid) and providers.get(tid, "ollama") == "ollama"
+        ),
+        route_model,
+    )
     system = build_router_system(s)
     schema = build_route_schema(s)
     auto_tiers = frozenset(router_auto_ids(s))

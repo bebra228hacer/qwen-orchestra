@@ -26,8 +26,8 @@ Defaults: `0.8b` · nano · `2b` · `4b` · `7b` · `9b` · `14b` · coder · ul
 
 Слоты и промпты роутера — `qwen_orchestra/settings.py` / `settings.json`, UI «Модели и промпты» (выпадающий список тира).
 На любом тире можно `provider: openrouter` (ключ — env / `secrets.json`); worker без tools на OR.
-Эскалация по `rank`; тяжёлый код стартует на `coder`. Optional-тиры для health пропускаются, если не установлены.
-Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код.
+Эскалация по `rank`; тяжёлый код стартует на `coder`. Жёстких required-тиров нет — health ok при ≥1 доступной модели; отсутствующие слоты — warning.
+Floor (код): tiny только приветствия/арифметика; иначе mid+; coder — отладка и крупный код; при отсутствии тира — `_fit_tier` к ближайшему доступному.
 Тексты для LLM-роутера — editable per-slot `router_prompt` (не путать с `tier_floor`).
 Для Qwen3.5 в `llm.py` всегда `think: false` (роутер/tools/стрим без thinking).
 

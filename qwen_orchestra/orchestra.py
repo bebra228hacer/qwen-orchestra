@@ -41,17 +41,74 @@ MODELS: dict[str, str] = {
 # id слота → ollama | openrouter (синхронизируется apply_to_runtime)
 PROVIDERS: dict[str, str] = {tid: "ollama" for tid in MODELS}
 
-# Без этих моделей оркестр не стартует; остальные — опционально
-REQUIRED_TIERS: tuple[str, ...] = ("tiny", "mid", "heavy")
-OPTIONAL_TIERS: tuple[str, ...] = (
-    "nano",
-    "small",
-    "large",
-    "xlarge",
-    "coder",
-    "ultra",
-    "frontier",
-)
+# Совместимость со старым API (shim orchestra.py); логика health больше не делит required/optional
+REQUIRED_TIERS: tuple[str, ...] = ()
+OPTIONAL_TIERS: tuple[str, ...] = ()
+
+
+def available_tiers(
+    have: set[str] | None = None,
+    *,
+    models: dict[str, str] | None = None,
+    providers: dict[str, str] | None = None,
+) -> set[Tier]:
+    """Тиры с реально доступной моделью (Ollama установлена или OR + ключ + непустое имя)."""
+    have = have if have is not None else set(installed_models())
+    src_models = models if models is not None else MODELS
+    src_providers = providers if providers is not None else PROVIDERS
+    or_ok = app_settings.openrouter_configured()
+    result: set[Tier] = set()
+    for t, name in src_models.items():
+        name = (name or "").strip()
+        if not name:
+            continue
+        if src_providers.get(t, "ollama") == "openrouter":
+            if or_ok:
+                result.add(t)
+        elif name in have:
+            result.add(t)
+    return result
+
+
+def _unavailable_slot_labels(
+    have: set[str],
+    *,
+    models: dict[str, str] | None = None,
+    providers: dict[str, str] | None = None,
+) -> list[str]:
+    src_models = models if models is not None else MODELS
+    src_providers = providers if providers is not None else PROVIDERS
+    or_ok = app_settings.openrouter_configured()
+    out: list[str] = []
+    for t, name in src_models.items():
+        name = (name or "").strip()
+        if not name:
+            out.append(f"{t}:(пусто)")
+            continue
+        if src_providers.get(t, "ollama") == "openrouter":
+            if not or_ok:
+                out.append(f"openrouter:{name}")
+            continue
+        if name not in have:
+            out.append(name)
+    return out
+
+
+def missing_models(have: set[str] | None = None) -> list[str]:
+    """Критичные пробелы: только если нет ни одного доступного тира."""
+    have = have if have is not None else set(installed_models())
+    if available_tiers(have):
+        return []
+    return _unavailable_slot_labels(have) or ["(нет доступных слотов)"]
+
+
+def missing_optional_models(have: set[str] | None = None) -> list[str]:
+    """Недоступные слоты при том, что хотя бы один тир уже работает."""
+    have = have if have is not None else set(installed_models())
+    avail = available_tiers(have)
+    if not avail:
+        return []
+    return _unavailable_slot_labels(have)
 
 MAX_TOOL_ROUNDS = 4
 MAX_TOOL_CALLS = 8
@@ -144,54 +201,6 @@ class OrchestraResult:
     context_reason: str = ""
 
 
-def missing_models(have: set[str] | None = None) -> list[str]:
-    """Обязательные модели (tiny/mid/heavy), без которых auto не работает."""
-    have = have if have is not None else set(installed_models())
-    out: list[str] = []
-    for t in REQUIRED_TIERS:
-        name = MODELS.get(t)
-        if not name:
-            continue
-        if PROVIDERS.get(t, "ollama") == "openrouter":
-            # required всегда local; на всякий случай
-            if not app_settings.openrouter_configured():
-                out.append(f"openrouter:{name}")
-            continue
-        if name not in have:
-            out.append(name)
-    return out
-
-
-def missing_optional_models(have: set[str] | None = None) -> list[str]:
-    """14b / coder / OpenRouter-слоты — можно пользоваться без них."""
-    have = have if have is not None else set(installed_models())
-    out: list[str] = []
-    for t in OPTIONAL_TIERS:
-        name = MODELS.get(t)
-        if not name:
-            continue
-        if PROVIDERS.get(t, "ollama") == "openrouter":
-            if not app_settings.openrouter_configured():
-                out.append(f"openrouter:{name}")
-            continue
-        if name not in have:
-            out.append(name)
-    return out
-
-
-def available_tiers(have: set[str] | None = None) -> set[Tier]:
-    have = have if have is not None else set(installed_models())
-    or_ok = app_settings.openrouter_configured()
-    result: set[Tier] = set()
-    for t, name in MODELS.items():
-        if PROVIDERS.get(t, "ollama") == "openrouter":
-            if or_ok:
-                result.add(t)
-        elif name in have:
-            result.add(t)
-    return result
-
-
 def _provider_of(tier: str, providers: dict[str, str] | None = None) -> str:
     src = providers if providers is not None else PROVIDERS
     return src.get(tier, "ollama") or "ollama"
@@ -239,16 +248,9 @@ def _escalate_sort_key(t: Tier) -> tuple[int, int, str]:
 
 
 def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
-    """Следующий установленный тир при эскалации: coder → xlarge, иначе по лестнице."""
+    """Следующий установленный тир при эскалации (TIER_ORDER / rank; coder↔xlarge)."""
     if available is None:
-        if tier == "coder":
-            return "xlarge"
-        if tier not in TIER_ORDER:
-            higher = [t for t in TIER_ORDER if _rank(t) > _rank(tier)]
-            return higher[0] if higher else None
-        idx = TIER_ORDER.index(tier)
-        nxt = TIER_ORDER[min(idx + 1, len(TIER_ORDER) - 1)]
-        return None if nxt == tier else nxt
+        available = available_tiers()
 
     if tier == "coder":
         for cand in ("ultra", "frontier", "xlarge", "heavy", "mid"):
@@ -256,18 +258,43 @@ def _next_tier(tier: Tier, available: set[Tier] | None = None) -> Tier | None:
                 return cand
         return None
 
-    # Сначала лестница TIER_ORDER (xlarge без coder), затем кастомные слоты выше по rank
     if tier in TIER_ORDER:
         idx = TIER_ORDER.index(tier)
         for cand in TIER_ORDER[idx + 1 :]:
             if cand in available:
                 return cand
+        # xlarge: боковая ветка coder того же rank, если выше по лестнице никого нет
+        if tier == "xlarge" and "coder" in available:
+            return "coder"
 
     ranked = sorted(available, key=_escalate_sort_key)
     for cand in ranked:
         if _rank(cand) > _rank(tier):
             return cand
     return None
+
+
+def _local_review_tier(
+    available: set[Tier],
+    *,
+    models: dict[str, str],
+    providers: dict[str, str],
+    installed: set[str],
+    preferred: str = "mid",
+) -> Tier | None:
+    """Ближайший доступный Ollama-тир для selfcheck (OpenRouter не подходит)."""
+    local = {
+        t
+        for t in available
+        if providers.get(t, "ollama") == "ollama"
+        and (models.get(t) or "").strip() in installed
+    }
+    if not local:
+        return None
+    try:
+        return _fit_tier(preferred, local)
+    except RuntimeError:
+        return None
 
 
 def _escalated(start: Tier, final: Tier) -> bool:
@@ -692,12 +719,19 @@ def handle(
     def _prov(tier: Tier) -> str:
         return _provider_of(tier, providers)
 
+    ollama_exc: Exception | None = None
     try:
         installed = set(installed_models())
+        ollama_ok = True
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Ollama недоступна: {exc}") from exc
-    available = available_tiers(installed)
+        # Ollama молчит — ещё можно работать на OpenRouter-слотах
+        installed = set()
+        ollama_ok = False
+        ollama_exc = exc
+    available = available_tiers(installed, models=models, providers=providers)
     if not available:
+        if not ollama_ok and ollama_exc is not None:
+            raise RuntimeError(f"Ollama недоступна: {ollama_exc}") from ollama_exc
         raise RuntimeError("Нет установленных моделей оркестра")
 
     if force_tier:
@@ -751,10 +785,11 @@ def handle(
         _emit_token(on_token, text)
         if stream and verbose:
             print()
+        fb = _fit_tier("tiny", available)
         return OrchestraResult(
             text=text,
-            tier="tiny",
-            model=_model("tiny"),
+            tier=fb,
+            model=_model(fb),
             need_web=False,
             route_reason=decision.reason,
             checked=False,
@@ -871,8 +906,19 @@ def handle(
                 provider=provider,
             )
 
-        # LLM-ревью и на последней попытке — иначе checked врёт
-        review_model = selfcheck_model if selfcheck_model in installed else None
+        # LLM-ревью только на локальной модели (ближайший к mid)
+        review_tier = _local_review_tier(
+            available,
+            models=models,
+            providers=providers,
+            installed=installed,
+            preferred="mid",
+        )
+        review_model: str | None = None
+        if review_tier:
+            review_model = _model(review_tier)
+        elif selfcheck_model in installed:
+            review_model = selfcheck_model
         verdict = selfcheck.check(
             user_text,
             text,

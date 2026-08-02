@@ -18,7 +18,7 @@
 - **Python SDK** — `from qwen_orchestra import Client` (ask / route / health / settings in-process).
 - **CLI** — интерактивный оркестр и one-shot; лаунчер с автозапуском Ollama при необходимости.
 
-Defaults: `0.8b` · `nano` · `2b` · `4b` · `7b` · `9b` · `14b` · `coder` · `ultra` · `frontier` (optional кроме tiny/mid/heavy).
+Defaults: `0.8b` · `nano` · `2b` · `4b` · `7b` · `9b` · `14b` · `coder` · `ultra` · `frontier` (все тиры равноправны; health — ≥1 модель).
 
 ```
 user → route → plan context → worker (± web) → selfcheck

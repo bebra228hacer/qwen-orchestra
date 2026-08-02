@@ -31,18 +31,18 @@ def main() -> None:
 
     missing = missing_models(have)
     if missing:
-        print("Не хватает обязательных моделей:")
+        print("Нет ни одной доступной модели оркестра:")
         for m in missing:
-            print(f"  ollama pull {m}")
+            print(f"  ollama pull {m}" if not str(m).startswith("openrouter:") else f"  {m}")
         print()
         print("Установлено:", ", ".join(sorted(have)) or "(пусто)")
         sys.exit(1)
 
     optional = missing_optional_models(have)
     if optional:
-        print("Опциональные модели не установлены:")
+        print("Не установлены (оркестр всё равно работает):")
         for m in optional:
-            print(f"  ollama pull {m}")
+            print(f"  ollama pull {m}" if not str(m).startswith("openrouter:") else f"  {m}")
         print()
 
     history: list[dict] = []

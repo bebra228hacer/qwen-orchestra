@@ -75,8 +75,12 @@ class Client:
                 )
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
+            have: set[str] = set()
+            missing = missing_models(have)
+            missing_optional = missing_optional_models(have)
+            router_missing = True
         return {
-            "ok": ollama_ok and not missing,
+            "ok": not missing,
             "ollama": ollama_ok,
             "models": models,
             "missing": missing,

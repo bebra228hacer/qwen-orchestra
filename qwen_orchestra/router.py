@@ -1,28 +1,9 @@
-"""Роутер: валидация запроса + выбор tier (tiny / mid / heavy / xlarge / coder).
+"""Роутер: валидация запроса + выбор tier (10 фиксированных: tiny…frontier).
 
-Решение принимает tiny (qwen3.5:0.8b), но её выбор ограничен снизу
+Решение принимает модель роутера (по умолчанию tiny), но выбор ограничен снизу
 детерминированными правилами (`tier_floor`) — модель может поднять тир,
-но не опустить ниже того, что требует запрос. Так лечится недооценка
-сложности на коротких / неоднозначных запросах.
-
-Правила auto-режима (минимальный тир):
-
-| Признак запроса | Минимум |
-|---|---|
-| приветствие, спасибо/пока, простая арифметика `2+2` | tiny |
-| объяснения, перевод, советы, короткий how-to, web | mid |
-| простой код / скрипт / «что такое» / длина > 50 | mid |
-| сравнение, архитектура, доказательство, длинный анализ | heavy |
-| длина > 350, 3+ вопроса, многошаговый план | heavy |
-| traceback / стектрейс / отладка ошибки в коде | coder |
-| генерация приложения/API/сервиса, рефакторинг, тесты кода | coder |
-| код + несколько требований или описание > 80 символов | coder |
-
-Эскалация после самопроверки: tiny → mid → heavy → xlarge.
-Тяжёлый код стартует на `coder` (qwen2.5-coder:14b); при провале → xlarge.
-Роутер и mid — Qwen3.5; xlarge/coder остаются на Qwen2.5 14b.
-
-Модель может поднять тир выше floor, но не опустить ниже.
+но не опустить ниже того, что требует запрос. При отсутствии тира воркер
+подставляет ближайший доступный (`_fit_tier`).
 """
 
 from __future__ import annotations
@@ -304,8 +285,30 @@ def _tier_max(a: Tier, b: Tier) -> Tier:
 
 
 def _has_extra_auto() -> bool:
-    """Есть ли пользовательские auto-слоты — тогда LLM-роутер полезен и на mid/heavy."""
-    return bool(ROUTER_AUTO_TIERS - {"tiny", "mid", "heavy"})
+    """Есть ли auto-слоты кроме базовых tiny/mid/heavy — тогда LLM-роутер полезен и на mid/heavy."""
+    base = {"tiny", "mid", "heavy"}
+    return bool(ROUTER_AUTO_TIERS - base)
+
+
+def _resolve_local_router_model(*preferred: str) -> str | None:
+    """Первая установленная Ollama-модель из preferred, иначе любой локальный слот."""
+    from . import orchestra
+    from .llm import installed_models
+
+    try:
+        have = set(installed_models())
+    except Exception:  # noqa: BLE001
+        return None
+    for name in preferred:
+        if name and name in have:
+            return name
+    for tid in sorted(orchestra.MODELS.keys(), key=lambda t: (_rank(t), t)):
+        if orchestra.PROVIDERS.get(tid, "ollama") != "ollama":
+            continue
+        name = orchestra.MODELS.get(tid) or ""
+        if name in have:
+            return name
+    return None
 
 
 def _extract_json(text: str) -> dict | None:
@@ -591,13 +594,17 @@ def route(user_text: str) -> RouteDecision:
         return RouteDecision(True, "coder", False, "floor:coder", "")
     if floor == "xlarge":
         return RouteDecision(True, "xlarge", False, "floor:xlarge", "")
-    # mid/heavy без кастомных auto-слотов — детерминированно (экономия VRAM)
+    # mid/heavy без расширенного auto — детерминированно (экономия VRAM)
     if floor == "heavy" and not _has_extra_auto():
         return RouteDecision(True, "heavy", False, "floor:heavy", "")
     if floor == "mid" and not _has_extra_auto():
         return RouteDecision(True, _clamp("mid", user_text), False, "floor:mid", "")
 
-    data = _ask_router(ROUTE_MODEL, user_text, timeout=120)
+    ask_model = _resolve_local_router_model(ROUTE_MODEL)
+    if not ask_model:
+        return _heuristic(user_text)
+
+    data = _ask_router(ask_model, user_text, timeout=120)
     if not data:
         return _heuristic(user_text)
 
@@ -606,7 +613,7 @@ def route(user_text: str) -> RouteDecision:
     if tier_raw in ALL_TIERS:
         tier: Tier = tier_raw
     else:
-        tier = "mid" if "mid" in ALL_TIERS else next(iter(ALL_TIERS), "mid")
+        tier = "mid" if "mid" in ALL_TIERS else next(iter(sorted(ALL_TIERS, key=_rank)), "mid")
     need = web or (
         bool(data.get("need_web", False)) and bool(_SOFT_WEB_RE.search(user_text))
     )
@@ -621,8 +628,9 @@ def route(user_text: str) -> RouteDecision:
         reason = "override:valid"
         reply = ""
     elif not ok:
-        # ввод похож на мусор — второе мнение у mid, прежде чем отказывать
-        second = _ask_router(REVALIDATE_MODEL, user_text, timeout=180)
+        # ввод похож на мусор — второе мнение у mid (или ближайшей локальной), прежде чем отказывать
+        revalidate = _resolve_local_router_model(REVALIDATE_MODEL, ROUTE_MODEL)
+        second = _ask_router(revalidate, user_text, timeout=180) if revalidate else None
         if second and bool(second.get("ok", True)):
             ok = True
             tier = floor

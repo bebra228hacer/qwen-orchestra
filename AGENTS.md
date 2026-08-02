@@ -11,8 +11,8 @@
 ## Обязательные зависимости среды
 
 1. Сервис **Ollama** запущен (`http://localhost:11434`).
-2. Модели: `qwen3.5:0.8b`, `qwen3.5:4b`, `qwen3.5:9b` (`ollama pull …`).
-3. Опционально: nano/small/large/xlarge/coder/ultra/frontier (`qwen3.5:2b`, `qwen2.5:7b`/`14b`, …).
+2. Хотя бы одна модель из слотов оркестра (`ollama pull …` или OpenRouter-ключ).
+3. Рекомендуемый набор: tiny/mid/heavy + по желанию nano…frontier.
 4. Опционально: OpenRouter API key (`OPENROUTER_API_KEY` или UI → secrets.json) для внешних слотов.
 5. Python: `pip install -e ".[web]"` или `pip install -r requirements.txt` (`ddgs`, `psutil`; для веба — `fastapi`, `uvicorn`, `pydantic`).
 6. Публичный SDK: `from qwen_orchestra import Client` (in-process; см. `examples/ask_sdk.py`).
@@ -91,7 +91,7 @@ user → route → plan context → worker (± web tools) → selfcheck
 ```
 
 - Тиры: ровно **10 фиксированных** id: `tiny` / `nano` / `small` / `mid` / `large` / `heavy` / `xlarge` / `coder` / `ultra` / `frontier`.
-- Обязательные для health: `REQUIRED_TIERS` (tiny/mid/heavy); optional — остальные 7 (+ OR без ключа).
+- Обязательных тиров нет: health ok при ≥1 доступной модели; неустановленные — в `missing_optional`.
 - Промпты роутера («когда использовать») — per-slot `router_prompt`; собираются в `router.SYSTEM`.
 - Эскалация: по `rank` тиров; `coder` → ultra/frontier/xlarge при retry.
 - UI: «Модели и промпты» — remap моделей, выпадающий список тира, OpenRouter-ключ, промпты; «Назначить на тир».
@@ -213,7 +213,7 @@ Web-tool результаты **кэшируются** между retry (пов�
 | PUT | `/api/settings/providers/openrouter` | API-ключ OpenRouter (`secrets.json`; `{api_key}` / `{clear:true}`) |
 | POST | `/api/settings/reset` | Сброс к defaults |
 | POST | `/api/settings/slots` | Назначить модель на тир (`tier` + `provider`: ollama\|openrouter) |
-| DELETE | `/api/settings/slots/{id}` | Тиры фиксированы — всегда 400 (смените модель / reset) |
+| DELETE | `/api/settings/slots/{id}` | Сброс любого тира к defaults |
 | GET/POST | `/api/chats` | Список / создать |
 | GET/DELETE | `/api/chats/{id}` | История / удалить (409 если идёт генерация) |
 | POST | `/api/chats/{id}/clear` | Очистить (409 если идёт генерация) |
@@ -231,7 +231,7 @@ SSE events: `meta`, `token`, `tool`, `check`, `done`, `error`.
 Middleware: только Host `127.0.0.1`/`localhost` (+порт); для мутаций — Origin localhost (защита от DNS rebinding).
 Параллельные сообщения / clear / delete сериализуются worker-lock’ом; после clear ответ старого worker не дописывается (`generation`).
 
-`/api/health`: `ok` = Ollama доступна и нет **обязательных** missing; `missing_optional` — 14b/coder;
+`/api/health`: `ok` = есть ≥1 доступный тир (Ollama или OpenRouter); `missing` критичен; `missing_optional` — остальные недоступные слоты (не ломают ok);
 `router_missing` — модель роутера из settings не найдена в Ollama.
 Один запрос `/api/tags` на health (список моделей переиспользуется).
 

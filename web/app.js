@@ -417,8 +417,7 @@
     for (const t of list) {
       const opt = document.createElement("option");
       opt.value = t.id;
-      opt.textContent = t.id + (t.label && !String(t.label).startsWith(t.id) ? ` · ${t.label}` : "");
-      if (t.label && String(t.label).startsWith(t.id)) opt.textContent = t.label;
+      opt.textContent = t.label || t.id;
       selectEl.appendChild(opt);
     }
     if (prev && [...selectEl.options].some((o) => o.value === prev)) {
@@ -440,14 +439,18 @@
     return (base || raw).slice(0, 28);
   }
 
-  /** Цепочка слотов по rank (эскалация), без подряд одинаковых тегов. */
+  /** Цепочка слотов по rank: id, если размер модели дублируется. */
   function orchestraChainText(slots) {
     const list = [...(slots || [])].sort(
       (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
     );
     const tags = [];
+    const seenSizes = new Set();
     for (const s of list) {
-      const tag = shortModelTag(s.model);
+      const size = shortModelTag(s.model);
+      let tag = size;
+      if (seenSizes.has(size)) tag = s.id || size;
+      else seenSizes.add(size);
       if (tags.length && tags[tags.length - 1] === tag) continue;
       tags.push(tag);
     }
@@ -606,6 +609,79 @@
     els.modelsStatus.className = "modal-status" + (kind ? " " + kind : "");
   }
 
+  function defaultRankFor(tierId) {
+    const t = (state.fixedTiers || []).find((x) => x.id === tierId);
+    if (t && t.rank != null) return Number(t.rank);
+    const s = (state.slots || []).find((x) => x.id === tierId);
+    return s && s.rank != null ? Number(s.rank) : 0;
+  }
+
+  function fillCardTierSelect(selectEl, selected) {
+    selectEl.innerHTML = "";
+    const src =
+      state.fixedTiers.length > 0
+        ? state.fixedTiers
+        : (state.slots || []).map((s) => ({ id: s.id, rank: s.rank }));
+    const list = [...src].sort(
+      (a, b) => (a.rank ?? 0) - (b.rank ?? 0) || String(a.id).localeCompare(String(b.id))
+    );
+    for (const t of list) {
+      const opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.id;
+      selectEl.appendChild(opt);
+    }
+    if (selected && [...selectEl.options].some((o) => o.value === selected)) {
+      selectEl.value = selected;
+    }
+  }
+
+  function ensureCardDeleteBtn(card) {
+    const head = card.querySelector(".slot-card-head");
+    if (!head || head.querySelector(".btn-slot-delete")) return;
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "btn btn-ghost danger btn-slot-delete";
+    del.textContent = "Удалить";
+    del.title = "Сбросить тир к модели по умолчанию";
+    del.addEventListener("click", () => removeSlot(card.dataset.id));
+    head.appendChild(del);
+  }
+
+  function swapCardTiers(cardA, cardB) {
+    const idA = cardA.dataset.id;
+    const idB = cardB.dataset.id;
+    cardA.dataset.id = idB;
+    cardB.dataset.id = idA;
+    const tierA = cardA.querySelector(".slot-tier");
+    const tierB = cardB.querySelector(".slot-tier");
+    if (tierA) tierA.value = idB;
+    if (tierB) tierB.value = idA;
+    const rankA = cardA.querySelector(".slot-rank");
+    const rankB = cardB.querySelector(".slot-rank");
+    if (rankA) rankA.value = String(defaultRankFor(idB));
+    if (rankB) rankB.value = String(defaultRankFor(idA));
+  }
+
+  function onCardTierChange(card, newTier) {
+    const oldTier = card.dataset.id;
+    if (!newTier || newTier === oldTier) {
+      const sel = card.querySelector(".slot-tier");
+      if (sel) sel.value = oldTier;
+      return;
+    }
+    const other = [...els.modelsList.querySelectorAll(".slot-card")].find(
+      (c) => c !== card && c.dataset.id === newTier
+    );
+    if (other) {
+      swapCardTiers(card, other);
+    } else {
+      card.dataset.id = newTier;
+      const rankInp = card.querySelector(".slot-rank");
+      if (rankInp) rankInp.value = String(defaultRankFor(newTier));
+    }
+  }
+
   function renderModelsList(slots) {
     state.slots = (slots || []).map((s) => ({ ...s }));
     setIdleStatusLine(state.slots);
@@ -623,10 +699,22 @@
       idWrap.style.display = "flex";
       idWrap.style.alignItems = "center";
       idWrap.style.gap = "8px";
-      const idEl = document.createElement("span");
-      idEl.className = "slot-id";
-      idEl.textContent = "тир · " + slot.id;
-      idWrap.appendChild(idEl);
+      idWrap.style.flexWrap = "wrap";
+
+      const tierWrap = document.createElement("div");
+      tierWrap.className = "field-with-label tier-field";
+      const tierLab = document.createElement("label");
+      tierLab.className = "field-label";
+      tierLab.textContent = "Тир";
+      const tierSel = document.createElement("select");
+      tierSel.className = "tier-select slot-tier";
+      tierSel.title = "К какому тиру относится эта модель";
+      fillCardTierSelect(tierSel, slot.id);
+      tierSel.addEventListener("change", () => onCardTierChange(card, tierSel.value));
+      tierWrap.appendChild(tierLab);
+      tierWrap.appendChild(tierSel);
+      idWrap.appendChild(tierWrap);
+
       const provSel = document.createElement("select");
       provSel.className = "tier-select slot-provider";
       provSel.title = "Провайдер модели";
@@ -644,6 +732,7 @@
       idWrap.appendChild(provSel);
       head.appendChild(idWrap);
       card.appendChild(head);
+      ensureCardDeleteBtn(card);
 
       const meta = document.createElement("div");
       meta.className = "slot-meta";
@@ -718,9 +807,18 @@
 
   function collectSlotsFromDom() {
     const out = [];
+    const seen = new Set();
     for (const card of els.modelsList.querySelectorAll(".slot-card")) {
-      const id = card.dataset.id;
+      const tierEl = card.querySelector(".slot-tier");
+      const id = (tierEl && tierEl.value) || card.dataset.id;
+      if (!id) continue;
+      if (seen.has(id)) {
+        throw new Error(`Тир «${id}» выбран на двух карточках — оставьте уникальные`);
+      }
+      seen.add(id);
+      card.dataset.id = id;
       const prev = state.slots.find((s) => s.id === id) || {};
+      const fixed = (state.fixedTiers || []).find((t) => t.id === id) || {};
       const modelEl = card.querySelector(".slot-model");
       const provEl = card.querySelector(".slot-provider");
       const provider =
@@ -732,8 +830,8 @@
         router_prompt: card.querySelector(".slot-prompt").value.trim(),
         rank: Number(card.querySelector(".slot-rank").value) || 0,
         router_auto: card.querySelector(".slot-auto").checked,
-        required: !!prev.required,
-        optional: prev.optional !== false,
+        required: fixed.required != null ? !!fixed.required : !!prev.required,
+        optional: fixed.optional != null ? !!fixed.optional : prev.optional !== false,
         builtin: true,
         provider,
       });
@@ -868,6 +966,31 @@
     }
   }
 
+  async function removeSlot(id) {
+    if (!id) return;
+    if (
+      !confirm(
+        `Сбросить тир «${id}» к модели по умолчанию?`
+      )
+    ) {
+      return;
+    }
+    setModelsStatus("Удаление…");
+    try {
+      await persistDraftSlots();
+      const data = await api(`/api/settings/slots/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      });
+      state.fixedTiers = data.fixed_tiers || state.fixedTiers;
+      renderModelsList(data.slots || []);
+      populateTierSelect(data.slots || []);
+      setModelsStatus(`Тир «${id}» сброшен`, "ok");
+      await refreshHealth();
+    } catch (e) {
+      setModelsStatus(e.message, "err");
+    }
+  }
+
   async function resetModels() {
     if (!confirm("Сбросить модели и промпты роутера к значениям по умолчанию?")) return;
     setModelsStatus("Сброс…");
@@ -901,23 +1024,30 @@
         populateTierSelect(fromTiers);
         setIdleStatusLine(fromTiers);
       }
-      if (!h.ollama) {
+      if (!h.ollama && h.missing && h.missing.length) {
         els.health.className = "health err";
-        els.health.textContent = "Ollama недоступна" + (h.error ? `: ${h.error}` : "");
+        els.health.textContent =
+          "Нет доступных моделей" + (h.error ? `: ${h.error}` : "");
         return;
       }
       if (h.missing && h.missing.length) {
-        els.health.className = "health warn";
+        els.health.className = "health err";
         els.health.textContent = "Нет моделей: " + h.missing.join(", ");
         return;
       }
-      if (h.missing_optional && h.missing_optional.length) {
-        els.health.className = "health warn";
-        els.health.textContent = "Опционально: " + h.missing_optional.join(", ");
-        return;
+      // h.ok == есть ≥1 тир; missing_optional — мягкое замечание, не ломает ok
+      const bits = [];
+      if (h.ollama) bits.push("Ollama");
+      if (h.providers && h.providers.openrouter && h.providers.openrouter.configured) {
+        bits.push("OpenRouter");
       }
-      els.health.className = "health ok";
-      els.health.textContent = "Ollama · модели на месте";
+      bits.push(h.ok === false ? "не готова" : "готова");
+      if (h.missing_optional && h.missing_optional.length) {
+        bits.push("нет: " + h.missing_optional.slice(0, 4).join(", "));
+        if (h.missing_optional.length > 4) bits.push("…");
+      }
+      els.health.className = h.ok === false ? "health err" : "health ok";
+      els.health.textContent = bits.join(" · ");
     } catch (e) {
       els.health.className = "health err";
       els.health.textContent = "Сервер: " + e.message;
